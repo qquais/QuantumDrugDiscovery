@@ -1,0 +1,26 @@
+name: molgan-pt
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - rdkit
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pip
+  - zstd
+  - x264
+  - pillow
+  - scipy
+  - freetype
+  - libpng
+  - pip:
+      - pennylane
+      - pennylane-lightning
+      - pysmiles
