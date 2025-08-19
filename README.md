@@ -61,7 +61,7 @@ python main.py
 
 ## Others
 
-`results` folder stores the log files, trained models, pretrained quantum circuits, and the testing results.
+`results` folder stores the log files, trained models, pretrained quantum circuits, and the testing results, which is very big so added in the gitignore. I have added `imageresults` folder for the image results. 
 
 
 ## Credits
