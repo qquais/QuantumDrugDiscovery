@@ -6,6 +6,9 @@ archived/*
 
 *.sparsedataset
 
+.idea/
+
+
 # misc
 misc/*
 
@@ -21,7 +24,9 @@ results/
 
 # data
 data/NP_score.pkl.gz
+data/NP_score.pkl.gz.1
 data/SA_score.pkl.gz
+data/SA_score.pkl.gz.1
 data/gdb9.sdf
 data/gdb9.sdf.csv
 data/gdb9_9nodes.sparsedataset
