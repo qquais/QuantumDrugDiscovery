@@ -23,9 +23,6 @@ from frechetdist import frdist
 
 def upper(m, a):
     res = torch.zeros((m.shape[0], 36, 6)).to(m.device).long()
-    print("Shape of m:", m.shape)
-    print("Shape of a:", a.shape)
-    print("Shape of res before concatenation:", res.shape)
 
     for i in range(m.shape[0]):
         for j in range(5):
@@ -75,8 +72,20 @@ class Solver(object):
         self.la_gp = config.lambda_gp
         self.post_method = config.post_method
 
-        # RL reward suggested by medicinal chemist
-        self.metric = 'sas,qed,unique'
+        # RL reward settings
+        self.metric = getattr(config, 'metric', 'sas,qed,unique')
+        self.reward_mode = getattr(config, 'reward_mode', 'legacy')
+        self.enable_rl_loss = getattr(config, 'enable_rl_loss', True)
+        self.rw_qed = getattr(config, 'rw_qed', 0.35)
+        self.rw_sa = getattr(config, 'rw_sa', 0.35)
+        self.rw_logp = getattr(config, 'rw_logp', 0.0)
+        self.rw_unique = getattr(config, 'rw_unique', 0.15)
+        self.rw_novelty = getattr(config, 'rw_novelty', 0.10)
+        self.rw_clean_valid = getattr(config, 'rw_clean_valid', 0.05)
+        self.rw_fragment_penalty = getattr(config, 'rw_fragment_penalty', 0.20)
+        self.rw_clip_min = getattr(config, 'rw_clip_min', 0.0)
+        self.rw_clip_max = getattr(config, 'rw_clip_max', 1.0)
+        print(f"Reward mode: {self.reward_mode}, metric: {self.metric}", flush=True)
 
         # Training configurations
         self.batch_size = config.batch_size
@@ -332,6 +341,38 @@ class Solver(object):
 
     def reward(self, mols):
         """Calculate the rewards of mols"""
+        if self.reward_mode == 'weighted':
+            qed = MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=False)
+            sa = MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
+            logp = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
+            novelty = MolecularMetrics.novel_scores(mols, self.data).astype(np.float32)
+            unique = MolecularMetrics.unique_scores(mols).astype(np.float32)
+            clean_valid = MolecularMetrics.valid_scores(mols).astype(np.float32)
+
+            weighted_sum = (
+                self.rw_qed * qed +
+                self.rw_sa * sa +
+                self.rw_logp * logp +
+                self.rw_unique * unique +
+                self.rw_novelty * novelty +
+                self.rw_clean_valid * clean_valid
+            )
+            weight_total = (
+                self.rw_qed +
+                self.rw_sa +
+                self.rw_logp +
+                self.rw_unique +
+                self.rw_novelty +
+                self.rw_clean_valid
+            )
+            if weight_total > 0:
+                weighted_sum = weighted_sum / weight_total
+
+            fragment_penalty = 1.0 - clean_valid
+            rr = weighted_sum - self.rw_fragment_penalty * fragment_penalty
+            rr = np.clip(rr, self.rw_clip_min, self.rw_clip_max)
+            return rr.reshape(-1, 1)
+
         rr = 1.
         for m in ('logp,sas,qed,unique' if self.metric == 'all' else self.metric).split(','):
             if m == 'np':
@@ -587,8 +628,11 @@ class Solver(object):
 
             print('d_loss {:.2f} d_fake {:.2f} d_real {:.2f} g_loss: {:.2f}'.format(loss_D.item(), d_loss_fake.item(), d_loss_real.item(), loss_G.item()))
             print('======================= {} =============================='.format(datetime.datetime.now()), flush = True)
-            alpha = torch.abs(loss_G.detach() / loss_RL.detach()).detach()
-            train_step_G = cur_la * loss_G# + (1.0 - cur_la) * alpha * loss_RL
+            if self.enable_rl_loss:
+                alpha = torch.abs(loss_G.detach() / (loss_RL.detach() + 1e-8)).detach()
+                train_step_G = cur_la * loss_G + (1.0 - cur_la) * alpha * loss_RL
+            else:
+                train_step_G = cur_la * loss_G
 
             train_step_V = loss_V
 
@@ -668,7 +712,8 @@ class Solver(object):
 
                 # Save checkpoints
                 if self.mode == 'train':
-                    if (epoch_i + 1) % self.model_save_step == 0:
+                    # Save once per epoch (at first validation step) instead of every 10 steps.
+                    if a_step == 0 and (epoch_i + 1) % self.model_save_step == 0:
                         self.save_checkpoints(epoch_i=epoch_i)
 
                 # Saving molecule images

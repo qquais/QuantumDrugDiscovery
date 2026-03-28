@@ -3,6 +3,8 @@ import logging
 import numpy as np
 import torch
 
+from rdkit import Chem
+
 from utils.args import get_GAN_config
 from solver import Solver
 from utils.utils import MolecularMetrics
@@ -24,19 +26,19 @@ def main():
     # We are ONLY evaluating, never training
     config.mode = "test"
 
-    # >>> EDIT THIS to point to your JANUARY run directory <<<
-    # This folder must contain "model_dir", "log_dir", "img_dir"
-    config.saving_dir = r"results/GAN/20250126_234326/train"
+    # Fallback to baseline run if no custom --saving_dir is provided.
+    if config.saving_dir == "results/GAN/":
+        config.saving_dir = r"results/GAN/20250126_234326/train"
 
     config.model_dir_path = os.path.join(config.saving_dir, "model_dir")
     config.log_dir_path = os.path.join(config.saving_dir, "log_dir")
     config.img_dir_path = os.path.join(config.saving_dir, "img_dir")
 
     # Evaluation parameters
-    config.test_epoch = 300
-    # Use 500 for a quick test; later change to 5000 for final baseline
-    # config.test_sample_size = 500
-    config.test_sample_size = 5000
+    if config.test_epoch is None:
+        config.test_epoch = 300
+    if config.test_sample_size is None:
+        config.test_sample_size = 5000
     config.post_method = "softmax"
 
     # -------------------------------
@@ -107,6 +109,20 @@ def main():
 
     novelty_scores = MolecularMetrics.novel_scores(mols, data)
     novelty_fraction = float(np.mean(novelty_scores))
+    clean_valid_fraction = float(np.mean(MolecularMetrics.valid_scores(mols)))
+
+    valid_smiles = []
+    for m in mols:
+        if m is None:
+            continue
+        try:
+            s = Chem.MolToSmiles(m)
+            if s:
+                valid_smiles.append(s)
+        except Exception:
+            continue
+    dot_count = sum(1 for s in valid_smiles if "." in s)
+    star_count = sum(1 for s in valid_smiles if "*" in s)
 
     def stats(x):
         x = np.array(
@@ -123,8 +139,12 @@ def main():
     print("\n==== Epoch-300 RDKit Evaluation (GDB9 baseline) ====")
     print(f"Total samples:         {n_samples}")
     print(f"Validity fraction:     {valid_fraction:.3f}")
+    print(f"Clean validity frac.:  {clean_valid_fraction:.3f}")
     print(f"Uniqueness fraction:   {unique_fraction:.3f}")
     print(f"Novelty fraction:      {novelty_fraction:.3f}")
+    print(f"Valid smiles count:    {len(valid_smiles)}")
+    print(f'Contains "." count:    {dot_count}')
+    print(f'Contains "*" count:    {star_count}')
 
     print(
         f"\nQED  : mean={qed_mean:.3f}, std={qed_std:.3f}, min={qed_min:.3f}"
@@ -144,8 +164,12 @@ def main():
         f.write("Epoch-300 RDKit Evaluation (GDB9 baseline)\n")
         f.write(f"Total samples: {n_samples}\n")
         f.write(f"Validity fraction:   {valid_fraction:.3f}\n")
+        f.write(f"Clean validity frac: {clean_valid_fraction:.3f}\n")
         f.write(f"Uniqueness fraction: {unique_fraction:.3f}\n")
         f.write(f"Novelty fraction:    {novelty_fraction:.3f}\n\n")
+        f.write(f"Valid smiles count:  {len(valid_smiles)}\n")
+        f.write(f'Contains "." count:  {dot_count}\n')
+        f.write(f'Contains "*" count:  {star_count}\n\n')
         f.write(
             f"QED  : mean={qed_mean:.3f}, std={qed_std:.3f}, min={qed_min:.3f}\n"
         )

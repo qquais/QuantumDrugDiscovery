@@ -46,6 +46,10 @@ class MolecularMetrics(object):
         return np.array(list(map(MolecularMetrics.valid_lambda_special, mols)), dtype=np.float32)
 
     @staticmethod
+    def valid_special_total_score(mols):
+        return MolecularMetrics.valid_scores(mols).mean()
+
+    @staticmethod
     def valid_filter(mols):
         return list(filter(MolecularMetrics.valid_lambda, mols))
 
@@ -258,6 +262,7 @@ def all_scores(mols, data, norm=False, reconstruction=False):
         'drugcand': MolecularMetrics.drugcandidate_scores(mols, data)}.items()}
 
     m1 = {'valid': MolecularMetrics.valid_total_score(mols) * 100,
+          'clean_valid': MolecularMetrics.valid_special_total_score(mols) * 100,
           'unique': MolecularMetrics.unique_total_score(mols) * 100,
           'novel': MolecularMetrics.novel_total_score(mols, data) * 100}
 

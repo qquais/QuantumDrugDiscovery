@@ -23,6 +23,23 @@ def get_GAN_config():
     parser.add_argument('--lambda_wgan', type=float, default=1.0, help='weight between RL and GAN. 1.0 for Pure GAN and 0.0 for Pure RL')
     parser.add_argument('--lambda_gp', type=float, default=10.0, help='weight for gradient penalty')
     parser.add_argument('--post_method', type=str, default='softmax', choices=['softmax', 'soft_gumbel', 'hard_gumbel'])
+    parser.add_argument('--metric', type=str, default='sas,qed,unique',
+                        help='legacy reward metrics list, e.g. "sas,qed,unique"')
+    parser.add_argument('--reward_mode', type=str, default='legacy', choices=['legacy', 'weighted'],
+                        help='legacy multiplicative reward or weighted additive reward')
+    parser.add_argument('--enable_rl_loss', type=str2bool, default=True,
+                        help='include RL/value loss term in generator update')
+    parser.add_argument('--rw_qed', type=float, default=0.35, help='weight for QED component')
+    parser.add_argument('--rw_sa', type=float, default=0.35, help='weight for normalized SA component')
+    parser.add_argument('--rw_logp', type=float, default=0.00, help='weight for normalized logP component')
+    parser.add_argument('--rw_unique', type=float, default=0.15, help='weight for uniqueness component')
+    parser.add_argument('--rw_novelty', type=float, default=0.10, help='weight for novelty component')
+    parser.add_argument('--rw_clean_valid', type=float, default=0.05,
+                        help='weight for strict clean-valid component (no "." and no "*")')
+    parser.add_argument('--rw_fragment_penalty', type=float, default=0.20,
+                        help='penalty weight for fragmented/wildcard/invalid molecules')
+    parser.add_argument('--rw_clip_min', type=float, default=0.0, help='minimum clipped reward')
+    parser.add_argument('--rw_clip_max', type=float, default=1.0, help='maximum clipped reward')
 
     # Training configuration
     parser.add_argument('--batch_size', type=int, default=128, help='mini-batch size')
