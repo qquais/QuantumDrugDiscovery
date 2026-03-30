@@ -14,6 +14,8 @@ def get_GAN_config():
     parser.add_argument('--update_qc', type=bool, default=True, help='choose to update the quantum circuit')
     parser.add_argument('--qc_lr', type=float, default=None, help='learning rate of quantum circuit')
     parser.add_argument('--qc_pretrained', type=bool, default=False, help='choose to use pretrained quantum circuit')
+    parser.add_argument('--use_quantum_disc', type=str2bool, default='false',
+                        help='Use 3-stage hierarchical quantum discriminator')
 
     # Model configuration
     parser.add_argument('--complexity', type=str, default='nr', help='dimension of domain labels')

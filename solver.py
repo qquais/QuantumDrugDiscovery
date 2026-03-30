@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import datetime
 from utils.utils import *
 from models.models import Generator, Discriminator
+from q_discriminator import HybridModel as QuantumDiscriminator
 from data.sparse_molecular_dataset import SparseMolecularDataset
 from utils.logger import Logger
 
@@ -85,6 +86,8 @@ class Solver(object):
         self.rw_fragment_penalty = getattr(config, 'rw_fragment_penalty', 0.20)
         self.rw_clip_min = getattr(config, 'rw_clip_min', 0.0)
         self.rw_clip_max = getattr(config, 'rw_clip_max', 1.0)
+        self.use_quantum_disc = getattr(config, 'use_quantum_disc', False)
+        print(f"Quantum discriminator: {self.use_quantum_disc}", flush=True)
         print(f"Reward mode: {self.reward_mode}, metric: {self.metric}", flush=True)
 
         # Training configurations
@@ -171,12 +174,17 @@ class Solver(object):
                            self.data.atom_num_types,
                            self.dropout)
         
-        self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
+        if self.use_quantum_disc:
+            self.D = QuantumDiscriminator(LAYER3=True)
+            self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
+            print("Using 3-stage Quantum Discriminator", flush=True)
+        else:
+            self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
+            self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
         self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
 
         # Optimizers can be RMSprop or Adam
         self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), self.g_lr)
-        self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
         self.v_optimizer = torch.optim.RMSprop(self.V.parameters(), self.g_lr)
 
         # Print the networks
@@ -535,27 +543,45 @@ class Solver(object):
             cur_step = self.num_steps * epoch_i + a_step
 
             ########## Train the discriminator ##########
-        
-            # compute loss with real inputs
-            logits_real, features_real = self.D(a_tensor, None, x_tensor)
-            
-            # Z-to-target
-            edges_logits, nodes_logits = self.G(z)
-            # Postprocess with Gumbel softmax
-            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
-            
-            logits_fake, features_fake = self.D(edges_hat, None, nodes_hat) 
 
-            # Compute losses for gradient penalty
-            eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
-            x_int0 = (eps * a_tensor + (1. - eps) * edges_hat).requires_grad_(True)
-            x_int1 = (eps.squeeze(-1) * x_tensor + (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
-            grad0, grad1 = self.D(x_int0, None, x_int1)
-            grad_penalty = self.gradient_penalty(grad0, x_int0) + self.gradient_penalty(grad0, x_int1)
-                        
-            d_loss_real = torch.mean(logits_real)
-            d_loss_fake = torch.mean(logits_fake)
-            loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
+            if self.use_quantum_disc:
+                real_flat = ax_tensor[:, :, :5].float()
+                edges_logits, nodes_logits = self.G(z)
+                (edges_hat, nodes_hat) = self.postprocess(
+                    (edges_logits, nodes_logits), self.post_method)
+                ax_fake = upper(edges_hat, nodes_hat)
+                fake_flat = ax_fake[:, :, :5].float()
+                out_real = self.D(real_flat)
+                out_fake = self.D(fake_flat)
+                logits_real = out_real[:, 0:1]
+                logits_fake = out_fake[:, 0:1]
+                features_real = logits_real
+                features_fake = logits_fake
+                d_loss_real = torch.mean(logits_real)
+                d_loss_fake = torch.mean(logits_fake)
+                eps = torch.rand(real_flat.size(0), 1, 1).to(self.device)
+                x_int = (eps * real_flat +
+                         (1. - eps) * fake_flat).requires_grad_(True)
+                interp_out = self.D(x_int)[:, 0:1]
+                grad_penalty = self.gradient_penalty(interp_out, x_int)
+                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
+            else:
+                logits_real, features_real = self.D(a_tensor, None, x_tensor)
+                edges_logits, nodes_logits = self.G(z)
+                (edges_hat, nodes_hat) = self.postprocess(
+                    (edges_logits, nodes_logits), self.post_method)
+                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
+                eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
+                x_int0 = (eps * a_tensor +
+                          (1. - eps) * edges_hat).requires_grad_(True)
+                x_int1 = (eps.squeeze(-1) * x_tensor +
+                          (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
+                grad0, grad1 = self.D(x_int0, None, x_int1)
+                grad_penalty = (self.gradient_penalty(grad0, x_int0) +
+                                self.gradient_penalty(grad0, x_int1))
+                d_loss_real = torch.mean(logits_real)
+                d_loss_fake = torch.mean(logits_fake)
+                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
             
 
             if cur_la > 0:
@@ -592,7 +618,14 @@ class Solver(object):
             # Postprocess with Gumbel softmax
             (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
             
-            logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
+            if self.use_quantum_disc:
+                ax_fake_gen = upper(edges_hat, nodes_hat)
+                fake_flat_gen = ax_fake_gen[:, :, :5].float()
+                out_fake_gen = self.D(fake_flat_gen)
+                logits_fake = out_fake_gen[:, 0:1]
+                features_fake = logits_fake
+            else:
+                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
 
             # Value losses (RL)
             value_logit_real, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
