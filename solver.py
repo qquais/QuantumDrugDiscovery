@@ -23,7 +23,7 @@ from utils.logger import Logger
 from frechetdist import frdist
 
 def upper(m, a):
-    res = torch.zeros((m.shape[0], 36, 6)).to(m.device).long()
+    res = torch.zeros((m.shape[0], 36, a.shape[-1])).to(m.device).long()
 
     for i in range(m.shape[0]):
         for j in range(5):
