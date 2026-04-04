@@ -22,12 +22,12 @@ def get_GAN_config():
     parser.add_argument('--z_dim', type=int, default=8, help='dimension of domain labels')
     parser.add_argument('--g_conv_dim', default=[128, 256, 512], help='number of conv filters in the first layer of G')
     parser.add_argument('--d_conv_dim', type=int, default=[[128, 64], 128, [128, 64]], help='number of conv filters in the first layer of D')
-    parser.add_argument('--lambda_wgan', type=float, default=1.0, help='weight between RL and GAN. 1.0 for Pure GAN and 0.0 for Pure RL')
+    parser.add_argument('--lambda_wgan', type=float, default=0.5, help='weight between RL and GAN. 1.0 for Pure GAN and 0.0 for Pure RL')
     parser.add_argument('--lambda_gp', type=float, default=10.0, help='weight for gradient penalty')
     parser.add_argument('--post_method', type=str, default='softmax', choices=['softmax', 'soft_gumbel', 'hard_gumbel'])
     parser.add_argument('--metric', type=str, default='sas,qed,unique',
                         help='legacy reward metrics list, e.g. "sas,qed,unique"')
-    parser.add_argument('--reward_mode', type=str, default='legacy', choices=['legacy', 'weighted'],
+    parser.add_argument('--reward_mode', type=str, default='weighted', choices=['legacy', 'weighted'],
                         help='legacy multiplicative reward or weighted additive reward')
     parser.add_argument('--enable_rl_loss', type=str2bool, default=True,
                         help='include RL/value loss term in generator update')
