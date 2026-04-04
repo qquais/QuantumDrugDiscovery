@@ -1,9 +1,0 @@
-Epoch-300 RDKit Evaluation (GDB9 baseline)
-Total samples: 500
-Validity fraction:   0.860
-Uniqueness fraction: 0.891
-Novelty fraction:    0.832
-
-QED  : mean=0.403, std=0.175, min=0.000
-logP : mean=-0.183, std=1.468, min=-3.000
-SA   : mean=5.280, std=2.118, min=2.146
