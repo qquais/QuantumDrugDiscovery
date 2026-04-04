@@ -77,6 +77,9 @@ class Solver(object):
         self.metric = getattr(config, 'metric', 'sas,qed,unique')
         self.reward_mode = getattr(config, 'reward_mode', 'legacy')
         self.enable_rl_loss = getattr(config, 'enable_rl_loss', True)
+        self.freeze_g = getattr(config, 'freeze_g', False)
+        self.g_ckpt_dir = getattr(config, 'g_ckpt_dir', None)
+        self.g_resume_epoch = getattr(config, 'g_resume_epoch', None)
         self.rw_qed = getattr(config, 'rw_qed', 0.35)
         self.rw_sa = getattr(config, 'rw_sa', 0.35)
         self.rw_logp = getattr(config, 'rw_logp', 0.0)
@@ -136,6 +139,11 @@ class Solver(object):
 
         # Build the model
         self.build_model()
+
+        # Optionally freeze generator params (useful for quantum-D warm-start)
+        if self.freeze_g:
+            for p in self.G.parameters():
+                p.requires_grad = False
 
         # Quantum
         # quantum or not
@@ -211,13 +219,18 @@ class Solver(object):
             log.info(name)
             log.info("The number of parameters: {}".format(num_params))
 
-    def restore_model(self, resume_iters):
-        """Restore the trained generator and discriminator"""
-        print('Loading the trained models from step {}...'.format(resume_iters))
-        G_path = os.path.join(self.model_dir_path, '{}-G.ckpt'.format(resume_iters))
-        D_path = os.path.join(self.model_dir_path, '{}-D.ckpt'.format(resume_iters))
-        V_path = os.path.join(self.model_dir_path, '{}-V.ckpt'.format(resume_iters))
+    def restore_model(self, resume_iters, load_g_only=False):
+        """Restore trained networks from checkpoints."""
+        ckpt_dir = self.model_dir_path
+        print('Loading checkpoints from {} at step {}...'.format(ckpt_dir, resume_iters))
+        G_path = os.path.join(ckpt_dir, f'{resume_iters}-G.ckpt')
         self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
+
+        if load_g_only:
+            return
+
+        D_path = os.path.join(ckpt_dir, f'{resume_iters}-D.ckpt')
+        V_path = os.path.join(ckpt_dir, f'{resume_iters}-V.ckpt')
         self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
         self.V.load_state_dict(torch.load(V_path, map_location=lambda storage, loc: storage))
 
@@ -411,6 +424,15 @@ class Solver(object):
 
         # start training from scratch or resume training
         start_epoch = 0
+        if self.g_resume_epoch is not None:
+            # Warm-start generator only (e.g., from classical run)
+            if self.g_ckpt_dir is not None:
+                self.model_dir_path, orig_model_dir = self.g_ckpt_dir, self.model_dir_path
+            else:
+                orig_model_dir = None
+            self.restore_model(self.g_resume_epoch, load_g_only=True)
+            if orig_model_dir:
+                self.model_dir_path = orig_model_dir
         if self.resume_epoch is not None and self.mode == 'train':
             start_epoch = self.resume_epoch
             self.restore_model(self.resume_epoch)
@@ -492,7 +514,12 @@ class Solver(object):
                 print('[Testing]')
             else:
                 raise NotImplementedError
-        
+
+        # Linear temperature schedule for Gumbel/softmax
+        temp_start = getattr(self, 'gumbel_temp_start', 1.0)
+        temp_end = getattr(self, 'gumbel_temp_end', 1.0)
+        temp = temp_start + (temp_end - temp_start) * (epoch_i / max(1, self.num_epochs - 1))
+
         for a_step in range(the_step):
 
             # non-Quantum part
@@ -548,7 +575,7 @@ class Solver(object):
                 real_flat = ax_tensor[:, :, :5].float()
                 edges_logits, nodes_logits = self.G(z)
                 (edges_hat, nodes_hat) = self.postprocess(
-                    (edges_logits, nodes_logits), self.post_method)
+                    (edges_logits, nodes_logits), self.post_method, temperature=temp)
                 ax_fake = upper(edges_hat, nodes_hat)
                 fake_flat = ax_fake[:, :, :5].float()
                 out_real = self.D(real_flat)
@@ -569,7 +596,7 @@ class Solver(object):
                 logits_real, features_real = self.D(a_tensor, None, x_tensor)
                 edges_logits, nodes_logits = self.G(z)
                 (edges_hat, nodes_hat) = self.postprocess(
-                    (edges_logits, nodes_logits), self.post_method)
+                    (edges_logits, nodes_logits), self.post_method, temperature=temp)
                 logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
                 eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
                 x_int0 = (eps * a_tensor +
@@ -616,7 +643,7 @@ class Solver(object):
             # Z-to-target
             edges_logits, nodes_logits = self.G(z)
             # Postprocess with Gumbel softmax
-            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
+            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method, temperature=temp)
             
             if self.use_quantum_disc:
                 ax_fake_gen = upper(edges_hat, nodes_hat)
@@ -703,7 +730,7 @@ class Solver(object):
 
 
             ########## Frechet distribution ##########
-            (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel')
+            (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel', temperature=temp)
             edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
             R = [list(a[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
             F = [list(edges_hard[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
