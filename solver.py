@@ -176,7 +176,7 @@ class Solver(object):
         
         if self.use_quantum_disc:
             self.D = SimpleQuantumDisc()
-            self.d_optimizer = torch.optim.SGD(self.D.parameters(), lr=1e-4)
+            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-4, betas=(0.5, 0.9))
             print("Using SimpleQuantumDisc (single-circuit, 8-qubit)", flush=True)
         else:
             self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
@@ -564,7 +564,7 @@ class Solver(object):
                          (1. - eps) * fake_flat).requires_grad_(True)
                 interp_out = self.D(x_int)[:, 0:1]
                 grad_penalty = self.gradient_penalty(interp_out, x_int)
-                loss_D = d_loss_real + d_loss_fake
+                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
             else:
                 logits_real, features_real = self.D(a_tensor, None, x_tensor)
                 edges_logits, nodes_logits = self.G(z)
