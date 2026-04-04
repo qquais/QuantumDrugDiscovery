@@ -1,6 +1,7 @@
 import pennylane as qml
 import sys
 import torch
+import torch.nn.functional as F
 
 ATOM_NUM = 45
 n_circuites = ATOM_NUM
@@ -86,3 +87,38 @@ class HybridModel(torch.nn.Module):
         else:
             out = self.qlayer_21(x)
         return self.softmax(out)
+
+
+# --- SimpleQuantumDisc ---
+# Single-circuit quantum discriminator.
+# Input: (batch, 45, 5) -> flatten -> (batch, 225) -> pad to 256
+# 8 qubits, 3 StronglyEntanglingLayers, measure PauliZ on qubit 4
+# Output: (batch, 1)
+
+_sq_n_qubits = 8
+_sq_n_layers = 3
+_sq_dev = qml.device("default.qubit", wires=_sq_n_qubits)
+
+@qml.qnode(_sq_dev, interface="torch", diff_method="backprop")
+def _sq_qnode(inputs, weights):
+    qml.templates.AmplitudeEmbedding(inputs, wires=range(_sq_n_qubits),
+                                     pad_with=0.0, normalize=True)
+    qml.templates.StronglyEntanglingLayers(weights, wires=range(_sq_n_qubits))
+    return qml.expval(qml.PauliZ(wires=4))
+
+_sq_weight_shapes = {"weights": (_sq_n_layers, _sq_n_qubits, 3)}
+
+
+class SimpleQuantumDisc(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.qlayer = qml.qnn.TorchLayer(_sq_qnode, _sq_weight_shapes)
+
+    def forward(self, x):
+        # x: (batch, 45, 5)
+        batch = x.shape[0]
+        x = x.reshape(batch, -1).float()          # (batch, 225)
+        pad_size = 256 - x.shape[1]               # 256 - 225 = 31
+        x = F.pad(x, (0, pad_size))               # (batch, 256)
+        out = self.qlayer(x)                       # (batch,)
+        return out.unsqueeze(1)                    # (batch, 1)

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import datetime
 from utils.utils import *
 from models.models import Generator, Discriminator
-from q_discriminator import HybridModel as QuantumDiscriminator
+from q_discriminator import HybridModel as QuantumDiscriminator, SimpleQuantumDisc
 from data.sparse_molecular_dataset import SparseMolecularDataset
 from utils.logger import Logger
 
@@ -175,9 +175,9 @@ class Solver(object):
                            self.dropout)
         
         if self.use_quantum_disc:
-            self.D = QuantumDiscriminator(LAYER3=True)
+            self.D = SimpleQuantumDisc()
             self.d_optimizer = torch.optim.SGD(self.D.parameters(), lr=1e-4)
-            print("Using 3-stage Quantum Discriminator", flush=True)
+            print("Using SimpleQuantumDisc (single-circuit, 8-qubit)", flush=True)
         else:
             self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
             self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
