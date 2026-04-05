@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import datetime
 from utils.utils import *
 from models.models import Generator, Discriminator
-from q_discriminator import HybridModel as QuantumDiscriminator, SimpleQuantumDisc, sanity_check_quantum_disc
+from q_discriminator import HybridModel as QuantumDiscriminator, KaoQuantumDisc, sanity_check_quantum_disc
 from data.sparse_molecular_dataset import SparseMolecularDataset
 from utils.logger import Logger
 
@@ -142,30 +142,9 @@ class Solver(object):
         # Build the model
         self.build_model()
 
-        # Quantum discriminator sanity check + pre-warm
+        # Quantum discriminator sanity check
         if self.use_quantum_disc:
             sanity_check_quantum_disc(self.D, device=str(self.device))
-            print("[pre-warm] Pre-warming quantum discriminator for 30 steps...", flush=True)
-            warm_opt = torch.optim.Adam(self.D.parameters(), lr=1e-3)
-            self.D.train()
-            for step in range(30):
-                mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
-                a_t = torch.from_numpy(a).to(self.device).long()
-                x_t = torch.from_numpy(x).to(self.device).long()
-                a_tensor = self.label2onehot(a_t, self.b_dim)
-                x_tensor = self.label2onehot(x_t, self.m_dim)
-                real_flat = upper(a_tensor, x_tensor)[:, :, :5].float()
-                noise_flat = torch.randn_like(real_flat)
-                out_real = torch.sigmoid(self.D(real_flat))
-                out_noise = torch.sigmoid(self.D(noise_flat))
-                loss = -torch.log(out_real + 1e-8).mean() - torch.log(1 - out_noise + 1e-8).mean()
-                warm_opt.zero_grad()
-                loss.backward()
-                warm_opt.step()
-                if step % 10 == 0:
-                    print(f"[pre-warm] step {step}: loss={loss.item():.4f} "
-                          f"real={out_real.mean().item():.3f} noise={out_noise.mean().item():.3f}", flush=True)
-            print("[pre-warm] Done.", flush=True)
 
         # Optionally freeze generator params (useful for quantum-D warm-start)
         if self.freeze_g:
@@ -210,9 +189,14 @@ class Solver(object):
                            self.dropout)
         
         if self.use_quantum_disc:
-            self.D = SimpleQuantumDisc()
-            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-4, betas=(0.5, 0.9))
-            print("Using SimpleQuantumDisc (single-circuit, 8-qubit)", flush=True)
+            self.D = KaoQuantumDisc()
+            # Kao et al. use SGD with lr=1e-4 for the quantum discriminator
+            self.d_optimizer = torch.optim.SGD(self.D.parameters(), lr=1e-4)
+            # n_critic=10 as per Kao et al. (1G step per 10D steps)
+            self.n_critic = 10
+            # g_lr=1e-4 stabilises training with quantum disc (Kao et al.)
+            self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), lr=1e-4)
+            print("Using KaoQuantumDisc (9-qubit, Kao et al. 2023)", flush=True)
         else:
             self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
             self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
@@ -599,26 +583,26 @@ class Solver(object):
             ########## Train the discriminator ##########
 
             if self.use_quantum_disc:
-                real_flat = ax_tensor[:, :, :5].float()
+                # Kao et al.: flat concat of bond+atom one-hots -> (batch, 450)
+                real_flat = torch.cat([a_tensor.view(a_tensor.shape[0], -1),
+                                       x_tensor.view(x_tensor.shape[0], -1)], dim=1).float()
+                # Weight clamping (Kao et al. WGAN, no gradient penalty)
+                for parm in self.D.parameters():
+                    parm.data.clamp_(-0.01, 0.01)
                 edges_logits, nodes_logits = self.G(z)
                 (edges_hat, nodes_hat) = self.postprocess(
                     (edges_logits, nodes_logits), self.post_method, temperature=temp)
-                ax_fake = upper(edges_hat, nodes_hat)
-                fake_flat = ax_fake[:, :, :5].float()
-                out_real = self.D(real_flat)
-                out_fake = self.D(fake_flat)
-                logits_real = out_real[:, 0:1]
-                logits_fake = out_fake[:, 0:1]
+                fake_flat = torch.cat([edges_hat.view(edges_hat.shape[0], -1),
+                                       nodes_hat.view(nodes_hat.shape[0], -1)], dim=1).float()
+                logits_real = self.D(real_flat)   # (batch, 1)
+                logits_fake = self.D(fake_flat)   # (batch, 1)
                 features_real = logits_real
                 features_fake = logits_fake
                 d_loss_real = torch.mean(logits_real)
                 d_loss_fake = torch.mean(logits_fake)
-                eps = torch.rand(real_flat.size(0), 1, 1).to(self.device)
-                x_int = (eps * real_flat +
-                         (1. - eps) * fake_flat).requires_grad_(True)
-                interp_out = self.D(x_int)[:, 0:1]
-                grad_penalty = self.gradient_penalty(interp_out, x_int)
-                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
+                grad_penalty = torch.tensor(0.0)
+                # Kao et al. loss (not standard WGAN — see their solver.py line 464)
+                loss_D = d_loss_real + d_loss_fake
             else:
                 logits_real, features_real = self.D(a_tensor, None, x_tensor)
                 edges_logits, nodes_logits = self.G(z)
@@ -673,10 +657,9 @@ class Solver(object):
             (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method, temperature=temp)
             
             if self.use_quantum_disc:
-                ax_fake_gen = upper(edges_hat, nodes_hat)
-                fake_flat_gen = ax_fake_gen[:, :, :5].float()
-                out_fake_gen = self.D(fake_flat_gen)
-                logits_fake = out_fake_gen[:, 0:1]
+                fake_flat_gen = torch.cat([edges_hat.view(edges_hat.shape[0], -1),
+                                           nodes_hat.view(nodes_hat.shape[0], -1)], dim=1).float()
+                logits_fake = self.D(fake_flat_gen)  # (batch, 1)
                 features_fake = logits_fake
             else:
                 logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)

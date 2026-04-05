@@ -22,6 +22,8 @@ data/generated_molecules/
 # results
 results/
 
+original_kao_code/
+
 # ── ADD THESE for your project ────────────────────────────────────────────────
  
 # Mac junk

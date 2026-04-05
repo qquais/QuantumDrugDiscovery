@@ -97,49 +97,50 @@ class HybridModel(torch.nn.Module):
         return self.sigmoid(self.output_layer(out))
 
 
-# --- SimpleQuantumDisc ---
-# Single-circuit quantum discriminator.
-# Input: (batch, 45, 5) -> flatten -> (batch, 225) -> pad to 256
-# 8 qubits, 3 StronglyEntanglingLayers, measure PauliZ on qubit 4
-# Output: (batch, 1)
+# --- KaoQuantumDisc ---
+# Exact replication of Kao et al. (2023) MolGAN-CQ quantum discriminator.
+# Input: flat concat of bond matrix + atom vector -> (batch, 450) -> pad to 512
+# 9 qubits, 3 StronglyEntanglingLayers, measure ONE qubit (qubit 4)
+# Output: (batch, 1) — unbounded scalar, used with weight clamping (WGAN)
 
-_sq_n_qubits = 8
-_sq_n_layers = 3
-_sq_dev = qml.device("default.qubit", wires=_sq_n_qubits)
+_kao_n_qubits = 9
+_kao_n_layers = 3
+_kao_measured_qubit = 4
+_kao_dev = qml.device("default.qubit", wires=_kao_n_qubits)
 
-@qml.qnode(_sq_dev, interface="torch", diff_method="backprop")
-def _sq_qnode(inputs, weights):
-    qml.templates.AmplitudeEmbedding(inputs, wires=range(_sq_n_qubits),
-                                     pad_with=0.0, normalize=True)
-    qml.templates.StronglyEntanglingLayers(weights, wires=range(_sq_n_qubits))
-    return [qml.expval(qml.PauliZ(wires=i)) for i in range(_sq_n_qubits)]
+@qml.qnode(_kao_dev, interface="torch", diff_method="backprop")
+def _kao_qnode(inputs, weights):
+    qml.templates.AmplitudeEmbedding(inputs, wires=range(_kao_n_qubits),
+                                     pad_with=0.001, normalize=True)
+    qml.templates.StronglyEntanglingLayers(weights, wires=range(_kao_n_qubits))
+    return [qml.expval(qml.PauliZ(wires=i))
+            for i in range(_kao_measured_qubit, _kao_measured_qubit + 1)]
 
-_sq_weight_shapes = {"weights": (_sq_n_layers, _sq_n_qubits, 3)}
+_kao_weight_shapes = {"weights": (_kao_n_layers, _kao_n_qubits, 3)}
 
 
-class SimpleQuantumDisc(torch.nn.Module):
+class KaoQuantumDisc(torch.nn.Module):
+    """Kao et al. (2023) quantum discriminator — 9 qubits, measure qubit 4."""
     def __init__(self):
         super().__init__()
-        self.qlayer = qml.qnn.TorchLayer(_sq_qnode, _sq_weight_shapes)
-        self.output_layer = torch.nn.Linear(_sq_n_qubits, 1)
-        self.sigmoid = torch.nn.Sigmoid()
+        self.qlayer = qml.qnn.TorchLayer(_kao_qnode, _kao_weight_shapes)
 
     def forward(self, x):
-        # x: (batch, 45, 5)
-        batch = x.shape[0]
-        x = x.reshape(batch, -1).float()          # (batch, 225)
-        pad_size = 256 - x.shape[1]               # 256 - 225 = 31
-        x = F.pad(x, (0, pad_size))               # (batch, 256)
-        out = self.qlayer(x)                       # (batch, 8)
-        return self.output_layer(out)              # (batch, 1) — unbounded for WGAN critic
+        # x: (batch, 450) — flat concat of bond+atom one-hots
+        x = x.reshape(x.shape[0], -1).float()
+        return self.qlayer(x)  # (batch, 1) — unbounded PauliZ expectation
+
+
+# Keep SimpleQuantumDisc as alias for backwards compatibility
+SimpleQuantumDisc = KaoQuantumDisc
 
 
 def sanity_check_quantum_disc(model, device='cpu'):
-    """Verify: output in [0,1], outputs differ, gradients non-zero."""
+    """Verify: outputs differ, gradients non-zero. Input: (batch, 450) flat."""
     print("[sanity_check] Running quantum discriminator sanity check...", flush=True)
     model.eval()
-    x1 = torch.randn(2, 45, 5).to(device)
-    x2 = torch.randn(2, 45, 5).to(device)
+    x1 = torch.randn(2, 450).to(device)
+    x2 = torch.randn(2, 450).to(device)
     x1.requires_grad_(True)
 
     out1 = model(x1)
