@@ -70,9 +70,7 @@ class Solver(object):
         self.g_conv_dim = config.g_conv_dim
         self.d_conv_dim = config.d_conv_dim
         self.la = config.lambda_wgan
-        # Quantum disc outputs are bounded to ~[-1,1] (PauliZ), so GP lambda=10
-        # overwhelms the Wasserstein signal. Scale it down automatically.
-        self.la_gp = 0.1 if getattr(config, 'use_quantum_disc', False) else config.lambda_gp
+        self.la_gp = config.lambda_gp
         self.post_method = config.post_method
 
         # RL reward settings
@@ -190,11 +188,7 @@ class Solver(object):
         
         if self.use_quantum_disc:
             self.D = KaoQuantumDisc()
-            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-3, betas=(0.5, 0.9))
-            # n_critic=10 as per Kao et al. (1G step per 10D steps)
-            self.n_critic = 10
-            # g_lr=1e-4 stabilises training with quantum disc (Kao et al.)
-            self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), lr=1e-4)
+            self.d_optimizer = torch.optim.SGD(self.D.parameters(), lr=1e-4)
             print("Using KaoQuantumDisc (9-qubit, Kao et al. 2023)", flush=True)
         else:
             self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
@@ -582,26 +576,26 @@ class Solver(object):
             ########## Train the discriminator ##########
 
             if self.use_quantum_disc:
-                # Flat concat of bond+atom one-hots -> (batch, 450)
-                real_flat = torch.cat([a_tensor.view(a_tensor.shape[0], -1),
-                                       x_tensor.view(x_tensor.shape[0], -1)], dim=1).float()
+                # Weight clamping +-0.01 (applied before forward pass)
+                for p in self.D.parameters():
+                    p.data.clamp_(-0.01, 0.01)
+                # Upper-triangular bonds + atoms -> (batch, 45, 5) -> 225-dim in disc
+                idx = torch.triu_indices(9, 9, offset=1)
+                real_bonds = a_tensor[:, idx[0], idx[1], :]  # (batch, 36, 5)
+                real_upper = torch.cat([real_bonds, x_tensor], dim=1).float()  # (batch, 45, 5)
                 edges_logits, nodes_logits = self.G(z)
                 (edges_hat, nodes_hat) = self.postprocess(
                     (edges_logits, nodes_logits), self.post_method, temperature=temp)
-                fake_flat = torch.cat([edges_hat.view(edges_hat.shape[0], -1),
-                                       nodes_hat.view(nodes_hat.shape[0], -1)], dim=1).float()
-                logits_real = self.D(real_flat)   # (batch, 1)
-                logits_fake = self.D(fake_flat)   # (batch, 1)
+                fake_bonds = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
+                fake_upper = torch.cat([fake_bonds, nodes_hat], dim=1).float()  # (batch, 45, 5)
+                logits_real = self.D(real_upper)   # (batch, 1)
+                logits_fake = self.D(fake_upper)   # (batch, 1)
                 features_real = logits_real
                 features_fake = logits_fake
                 d_loss_real = torch.mean(logits_real)
                 d_loss_fake = torch.mean(logits_fake)
-                # Gradient penalty (quantum weights are rotation angles ~[-π,π],
-                # weight clamping ±0.01 zeros them out)
-                eps = torch.rand(real_flat.size(0), 1).to(self.device)
-                x_int = (eps * real_flat + (1. - eps) * fake_flat).requires_grad_(True)
-                grad_penalty = self.gradient_penalty(self.D(x_int), x_int)
-                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
+                grad_penalty = torch.tensor(0.0).to(self.device)
+                loss_D = d_loss_real + d_loss_fake
             else:
                 logits_real, features_real = self.D(a_tensor, None, x_tensor)
                 edges_logits, nodes_logits = self.G(z)
@@ -656,9 +650,10 @@ class Solver(object):
             (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method, temperature=temp)
             
             if self.use_quantum_disc:
-                fake_flat_gen = torch.cat([edges_hat.view(edges_hat.shape[0], -1),
-                                           nodes_hat.view(nodes_hat.shape[0], -1)], dim=1).float()
-                logits_fake = self.D(fake_flat_gen)  # (batch, 1)
+                idx = torch.triu_indices(9, 9, offset=1)
+                fake_bonds_gen = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
+                fake_upper_gen = torch.cat([fake_bonds_gen, nodes_hat], dim=1).float()
+                logits_fake = self.D(fake_upper_gen)  # (batch, 1)
                 features_fake = logits_fake
             else:
                 logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)

@@ -98,10 +98,11 @@ class HybridModel(torch.nn.Module):
 
 
 # --- KaoQuantumDisc ---
-# Exact replication of Kao et al. (2023) MolGAN-CQ quantum discriminator.
-# Input: flat concat of bond matrix + atom vector -> (batch, 450) -> pad to 512
+# 9-qubit quantum discriminator matching the reference architecture.
+# Input: upper-triangular bonds + atoms -> (batch, 225) -> pad to 512
 # 9 qubits, 3 StronglyEntanglingLayers, measure ONE qubit (qubit 4)
-# Output: (batch, 1) — unbounded scalar, used with weight clamping (WGAN)
+# Training: weight clamping +-0.01, loss = d_real + d_fake (same sign)
+# Output: (batch, 1) scalar PauliZ expectation
 
 _kao_n_qubits = 9
 _kao_n_layers = 3
@@ -113,23 +114,21 @@ def _kao_qnode(inputs, weights):
     qml.templates.AmplitudeEmbedding(inputs, wires=range(_kao_n_qubits),
                                      pad_with=0.001, normalize=True)
     qml.templates.StronglyEntanglingLayers(weights, wires=range(_kao_n_qubits))
-    return [qml.expval(qml.PauliZ(wires=i)) for i in range(_kao_n_qubits)]
+    return [qml.expval(qml.PauliZ(wires=_kao_measured_qubit))]
 
 _kao_weight_shapes = {"weights": (_kao_n_layers, _kao_n_qubits, 3)}
 
 
 class KaoQuantumDisc(torch.nn.Module):
-    """9-qubit quantum discriminator — all qubits measured, linear output."""
+    """9-qubit quantum discriminator — single qubit 4 measured, weight clamping."""
     def __init__(self):
         super().__init__()
         self.qlayer = qml.qnn.TorchLayer(_kao_qnode, _kao_weight_shapes)
-        self.output_layer = torch.nn.Linear(_kao_n_qubits, 1)
 
     def forward(self, x):
-        # x: (batch, 450) — flat concat of bond+atom one-hots
+        # x: (batch, 45, 5) upper-tri bonds+atoms, or (batch, 225) flat
         x = x.reshape(x.shape[0], -1).float()
-        out = self.qlayer(x)           # (batch, 9)
-        return self.output_layer(out)  # (batch, 1) — unbounded for WGAN
+        return self.qlayer(x)  # (batch, 1) — PauliZ expectation of qubit 4
 
 
 # Keep SimpleQuantumDisc as alias for backwards compatibility
@@ -137,11 +136,11 @@ SimpleQuantumDisc = KaoQuantumDisc
 
 
 def sanity_check_quantum_disc(model, device='cpu'):
-    """Verify: outputs differ, gradients non-zero. Input: (batch, 450) flat."""
+    """Verify: outputs differ, gradients non-zero. Input: (batch, 225) flat."""
     print("[sanity_check] Running quantum discriminator sanity check...", flush=True)
     model.eval()
-    x1 = torch.randn(2, 450).to(device)
-    x2 = torch.randn(2, 450).to(device)
+    x1 = torch.randn(2, 225).to(device)
+    x2 = torch.randn(2, 225).to(device)
     x1.requires_grad_(True)
 
     out1 = model(x1)
