@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import datetime
 from utils.utils import *
 from models.models import Generator, Discriminator
-from q_discriminator import HybridModel as QuantumDiscriminator, SimpleQuantumDisc
+from q_discriminator import HybridModel as QuantumDiscriminator, SimpleQuantumDisc, sanity_check_quantum_disc
 from data.sparse_molecular_dataset import SparseMolecularDataset
 from utils.logger import Logger
 
@@ -139,6 +139,31 @@ class Solver(object):
 
         # Build the model
         self.build_model()
+
+        # Quantum discriminator sanity check + pre-warm
+        if self.use_quantum_disc:
+            sanity_check_quantum_disc(self.D, device=str(self.device))
+            print("[pre-warm] Pre-warming quantum discriminator for 30 steps...", flush=True)
+            warm_opt = torch.optim.Adam(self.D.parameters(), lr=1e-3)
+            self.D.train()
+            for step in range(30):
+                mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
+                a_t = torch.from_numpy(a).to(self.device).long()
+                x_t = torch.from_numpy(x).to(self.device).long()
+                a_tensor = self.label2onehot(a_t, self.b_dim)
+                x_tensor = self.label2onehot(x_t, self.m_dim)
+                real_flat = upper(a_tensor, x_tensor)[:, :, :5].float()
+                noise_flat = torch.randn_like(real_flat)
+                out_real = self.D(real_flat)
+                out_noise = self.D(noise_flat)
+                loss = -torch.log(out_real + 1e-8).mean() - torch.log(1 - out_noise + 1e-8).mean()
+                warm_opt.zero_grad()
+                loss.backward()
+                warm_opt.step()
+                if step % 10 == 0:
+                    print(f"[pre-warm] step {step}: loss={loss.item():.4f} "
+                          f"real={out_real.mean().item():.3f} noise={out_noise.mean().item():.3f}", flush=True)
+            print("[pre-warm] Done.", flush=True)
 
         # Optionally freeze generator params (useful for quantum-D warm-start)
         if self.freeze_g:
