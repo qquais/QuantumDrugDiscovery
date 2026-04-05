@@ -131,7 +131,7 @@ class SimpleQuantumDisc(torch.nn.Module):
         pad_size = 256 - x.shape[1]               # 256 - 225 = 31
         x = F.pad(x, (0, pad_size))               # (batch, 256)
         out = self.qlayer(x)                       # (batch, 8)
-        return self.sigmoid(self.output_layer(out))  # (batch, 1)
+        return self.output_layer(out)              # (batch, 1) — unbounded for WGAN critic
 
 
 def sanity_check_quantum_disc(model, device='cpu'):
@@ -146,7 +146,6 @@ def sanity_check_quantum_disc(model, device='cpu'):
     out2 = model(x2)
 
     assert out1.shape == (2, 1), f"Bad output shape: {out1.shape}"
-    assert (out1 >= 0).all() and (out1 <= 1).all(), f"Output out of [0,1]: {out1}"
     assert not torch.allclose(out1, out2, atol=1e-4), "Outputs identical for different inputs!"
 
     loss = out1.sum()
