@@ -113,22 +113,23 @@ def _kao_qnode(inputs, weights):
     qml.templates.AmplitudeEmbedding(inputs, wires=range(_kao_n_qubits),
                                      pad_with=0.001, normalize=True)
     qml.templates.StronglyEntanglingLayers(weights, wires=range(_kao_n_qubits))
-    return [qml.expval(qml.PauliZ(wires=i))
-            for i in range(_kao_measured_qubit, _kao_measured_qubit + 1)]
+    return [qml.expval(qml.PauliZ(wires=i)) for i in range(_kao_n_qubits)]
 
 _kao_weight_shapes = {"weights": (_kao_n_layers, _kao_n_qubits, 3)}
 
 
 class KaoQuantumDisc(torch.nn.Module):
-    """Kao et al. (2023) quantum discriminator — 9 qubits, measure qubit 4."""
+    """9-qubit quantum discriminator — all qubits measured, linear output."""
     def __init__(self):
         super().__init__()
         self.qlayer = qml.qnn.TorchLayer(_kao_qnode, _kao_weight_shapes)
+        self.output_layer = torch.nn.Linear(_kao_n_qubits, 1)
 
     def forward(self, x):
         # x: (batch, 450) — flat concat of bond+atom one-hots
         x = x.reshape(x.shape[0], -1).float()
-        return self.qlayer(x)  # (batch, 1) — unbounded PauliZ expectation
+        out = self.qlayer(x)           # (batch, 9)
+        return self.output_layer(out)  # (batch, 1) — unbounded for WGAN
 
 
 # Keep SimpleQuantumDisc as alias for backwards compatibility
