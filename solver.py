@@ -583,12 +583,9 @@ class Solver(object):
             ########## Train the discriminator ##########
 
             if self.use_quantum_disc:
-                # Kao et al.: flat concat of bond+atom one-hots -> (batch, 450)
+                # Flat concat of bond+atom one-hots -> (batch, 450)
                 real_flat = torch.cat([a_tensor.view(a_tensor.shape[0], -1),
                                        x_tensor.view(x_tensor.shape[0], -1)], dim=1).float()
-                # Weight clamping (Kao et al. WGAN, no gradient penalty)
-                for parm in self.D.parameters():
-                    parm.data.clamp_(-0.01, 0.01)
                 edges_logits, nodes_logits = self.G(z)
                 (edges_hat, nodes_hat) = self.postprocess(
                     (edges_logits, nodes_logits), self.post_method, temperature=temp)
@@ -600,9 +597,12 @@ class Solver(object):
                 features_fake = logits_fake
                 d_loss_real = torch.mean(logits_real)
                 d_loss_fake = torch.mean(logits_fake)
-                grad_penalty = torch.tensor(0.0)
-                # Kao et al. loss (not standard WGAN — see their solver.py line 464)
-                loss_D = d_loss_real + d_loss_fake
+                # Gradient penalty (quantum weights are rotation angles ~[-π,π],
+                # weight clamping ±0.01 zeros them out)
+                eps = torch.rand(real_flat.size(0), 1).to(self.device)
+                x_int = (eps * real_flat + (1. - eps) * fake_flat).requires_grad_(True)
+                grad_penalty = self.gradient_penalty(self.D(x_int), x_int)
+                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
             else:
                 logits_real, features_real = self.D(a_tensor, None, x_tensor)
                 edges_logits, nodes_logits = self.G(z)
