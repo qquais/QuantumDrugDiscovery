@@ -70,7 +70,9 @@ class Solver(object):
         self.g_conv_dim = config.g_conv_dim
         self.d_conv_dim = config.d_conv_dim
         self.la = config.lambda_wgan
-        self.la_gp = config.lambda_gp
+        # Quantum disc outputs are bounded to ~[-1,1] (PauliZ), so GP lambda=10
+        # overwhelms the Wasserstein signal. Scale it down automatically.
+        self.la_gp = 0.1 if getattr(config, 'use_quantum_disc', False) else config.lambda_gp
         self.post_method = config.post_method
 
         # RL reward settings
