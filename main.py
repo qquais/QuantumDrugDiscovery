@@ -187,13 +187,13 @@ def main():
 
     # Ensure required directory paths exist in config
     if not hasattr(config, "log_dir_path"):
-        config.log_dir_path = "results/GAN/20250126_234326/train/log_dir"  # Default directory
+        config.log_dir_path = "results/classical/GAN/20250126_234326/train/log_dir"  # Default directory
 
     if not hasattr(config, "model_dir_path"):
-        config.model_dir_path = "results/GAN/20250126_234326/train/model_dir" # Default directory
+        config.model_dir_path = "results/classical/GAN/20250126_234326/train/model_dir" # Default directory
 
     if not hasattr(config, "img_dir_path"):
-        config.img_dir_path = "results/GAN/20250126_234326/train/img_dir"  # Default directory
+        config.img_dir_path = "results/classical/GAN/20250126_234326/train/img_dir"  # Default directory
 
 
     # Initialize Solver (but do not train)
