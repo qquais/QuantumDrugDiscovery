@@ -576,9 +576,6 @@ class Solver(object):
             ########## Train the discriminator ##########
 
             if self.use_quantum_disc:
-                # Weight clamping +-0.01 (applied before forward pass)
-                for p in self.D.parameters():
-                    p.data.clamp_(-0.01, 0.01)
                 # Upper-triangular bonds + atoms -> (batch, 45, 5) -> 225-dim in disc
                 idx = torch.triu_indices(9, 9, offset=1)
                 real_bonds = a_tensor[:, idx[0], idx[1], :]  # (batch, 36, 5)
@@ -595,7 +592,7 @@ class Solver(object):
                 d_loss_real = torch.mean(logits_real)
                 d_loss_fake = torch.mean(logits_fake)
                 grad_penalty = torch.tensor(0.0).to(self.device)
-                loss_D = d_loss_real + d_loss_fake
+                loss_D = -d_loss_real + d_loss_fake
             else:
                 logits_real, features_real = self.D(a_tensor, None, x_tensor)
                 edges_logits, nodes_logits = self.G(z)
@@ -635,12 +632,18 @@ class Solver(object):
                         self.reset_grad()
                         loss_D.backward()
                         self.d_optimizer.step()
+                        if self.use_quantum_disc:
+                            for p in self.D.parameters():
+                                p.data.clamp_(-0.01, 0.01)
                 else:
                     # training G for n_critic-1 times followed by D one time
                     if (cur_step != 0) and (cur_step % self.n_critic == 0):
                         self.reset_grad()
                         loss_D.backward()
                         self.d_optimizer.step()
+                        if self.use_quantum_disc:
+                            for p in self.D.parameters():
+                                p.data.clamp_(-0.01, 0.01)
 
             ########## Train the generator ##########
 
