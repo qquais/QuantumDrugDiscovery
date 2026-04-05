@@ -1,5 +1,9 @@
 import rdkit
-from pysmiles import read_smiles
+
+try:
+    from pysmiles import read_smiles
+except ModuleNotFoundError:
+    read_smiles = None
 
 import pickle
 import gzip
@@ -283,7 +287,8 @@ def save_mol_img(mols, f_name='tmp.png', is_test=False):
 
                 rdkit.Chem.Draw.MolToFile(a_mol, f_name)
                 a_smi = Chem.MolToSmiles(a_mol)
-                mol_graph = read_smiles(a_smi)
+                if read_smiles is not None:
+                    mol_graph = read_smiles(a_smi)
 
                 # break only give you one image
                 # break
