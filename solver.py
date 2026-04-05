@@ -190,8 +190,7 @@ class Solver(object):
         
         if self.use_quantum_disc:
             self.D = KaoQuantumDisc()
-            # Kao et al. use SGD with lr=1e-4 for the quantum discriminator
-            self.d_optimizer = torch.optim.SGD(self.D.parameters(), lr=1e-4)
+            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-3, betas=(0.5, 0.9))
             # n_critic=10 as per Kao et al. (1G step per 10D steps)
             self.n_critic = 10
             # g_lr=1e-4 stabilises training with quantum disc (Kao et al.)
