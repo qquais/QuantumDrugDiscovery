@@ -75,7 +75,7 @@ def get_GAN_config():
     parser.add_argument('--mol_data_dir', type=str, default='data/gdb9_9nodes.sparsedataset')
 
     # Saving directory
-    parser.add_argument('--saving_dir', type=str, default='results/GAN/')
+    parser.add_argument('--saving_dir', type=str, default='results/classical/GAN/')
 
     # Step size
     parser.add_argument('--model_save_step', type=int, default=1)

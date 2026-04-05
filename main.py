@@ -186,14 +186,21 @@ def main():
         config.gen_circuit = None
 
     # Ensure required directory paths exist in config
-    if not hasattr(config, "log_dir_path"):
-        config.log_dir_path = "results/classical/GAN/20250126_234326/train/log_dir"  # Default directory
-
     if not hasattr(config, "model_dir_path"):
-        config.model_dir_path = "results/classical/GAN/20250126_234326/train/model_dir" # Default directory
-
-    if not hasattr(config, "img_dir_path"):
-        config.img_dir_path = "results/classical/GAN/20250126_234326/train/img_dir"  # Default directory
+        # Auto-find the latest run under config.saving_dir (set via --saving_dir or default in args.py)
+        gan_base = config.saving_dir.rstrip("/")
+        if os.path.isdir(gan_base):
+            runs = sorted([d for d in os.listdir(gan_base) if os.path.isdir(os.path.join(gan_base, d))], reverse=True)
+            if runs:
+                latest = os.path.join(gan_base, runs[0], "train")
+                config.log_dir_path = os.path.join(latest, "log_dir")
+                config.model_dir_path = os.path.join(latest, "model_dir")
+                config.img_dir_path = os.path.join(latest, "img_dir")
+                print(f"Using latest run: {latest}")
+            else:
+                raise FileNotFoundError(f"No training runs found under {gan_base}")
+        else:
+            raise FileNotFoundError(f"Results directory not found: {gan_base}")
 
 
     # Initialize Solver (but do not train)
