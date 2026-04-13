@@ -188,7 +188,9 @@ class Solver(object):
         
         if self.use_quantum_disc:
             self.D = KaoQuantumDisc()
-            self.d_optimizer = torch.optim.SGD(self.D.parameters(), lr=1e-4)
+            self.n_critic = 10          # override: 10 D steps per G step
+            self.g_lr = 1e-4            # override: slower generator
+            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-3, betas=(0.5, 0.9))
             print("Using KaoQuantumDisc (9-qubit, Kao et al. 2023)", flush=True)
         else:
             self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
@@ -196,6 +198,7 @@ class Solver(object):
         self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
 
         # Optimizers can be RMSprop or Adam
+        # (g_lr is already overridden to 1e-4 above if quantum)
         self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), self.g_lr)
         self.v_optimizer = torch.optim.RMSprop(self.V.parameters(), self.g_lr)
 
@@ -579,12 +582,12 @@ class Solver(object):
                 # Upper-triangular bonds + atoms -> (batch, 45, 5) -> 225-dim in disc
                 idx = torch.triu_indices(9, 9, offset=1)
                 real_bonds = a_tensor[:, idx[0], idx[1], :]  # (batch, 36, 5)
-                real_upper = torch.cat([real_bonds, x_tensor], dim=1).float()  # (batch, 45, 5)
+                real_upper = torch.cat([real_bonds, x_tensor[:, :, :5]], dim=1).float()  # (batch, 45, 5)
                 edges_logits, nodes_logits = self.G(z)
                 (edges_hat, nodes_hat) = self.postprocess(
                     (edges_logits, nodes_logits), self.post_method, temperature=temp)
                 fake_bonds = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
-                fake_upper = torch.cat([fake_bonds, nodes_hat], dim=1).float()  # (batch, 45, 5)
+                fake_upper = torch.cat([fake_bonds, nodes_hat[:, :, :5]], dim=1).float()  # (batch, 45, 5)
                 logits_real = self.D(real_upper)   # (batch, 1)
                 logits_fake = self.D(fake_upper)   # (batch, 1)
                 features_real = logits_real
@@ -634,7 +637,7 @@ class Solver(object):
                         self.d_optimizer.step()
                         if self.use_quantum_disc:
                             for p in self.D.parameters():
-                                p.data.clamp_(-0.01, 0.01)
+                                p.data.clamp_(-0.5, 0.5)
                 else:
                     # training G for n_critic-1 times followed by D one time
                     if (cur_step != 0) and (cur_step % self.n_critic == 0):
@@ -643,7 +646,7 @@ class Solver(object):
                         self.d_optimizer.step()
                         if self.use_quantum_disc:
                             for p in self.D.parameters():
-                                p.data.clamp_(-0.01, 0.01)
+                                p.data.clamp_(-0.5, 0.5)
 
             ########## Train the generator ##########
 
