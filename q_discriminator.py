@@ -120,15 +120,16 @@ _kao_weight_shapes = {"weights": (_kao_n_layers, _kao_n_qubits, 3)}
 
 
 class KaoQuantumDisc(torch.nn.Module):
-    """9-qubit quantum discriminator — single qubit 4 measured, weight clamping."""
+    """9-qubit quantum discriminator — single qubit 4 measured, learned output scaling."""
     def __init__(self):
         super().__init__()
         self.qlayer = qml.qnn.TorchLayer(_kao_qnode, _kao_weight_shapes)
+        self.fc = torch.nn.Linear(1, 1)  # learnable scale+bias; unbounds the [-1,1] PauliZ output
 
     def forward(self, x):
         # x: (batch, 45, 5) upper-tri bonds+atoms, or (batch, 225) flat
         x = x.reshape(x.shape[0], -1).float()
-        return self.qlayer(x)  # (batch, 1) — PauliZ expectation of qubit 4
+        return self.fc(self.qlayer(x))  # (batch, 1) — unbounded critic score
 
 
 # Keep SimpleQuantumDisc as alias for backwards compatibility

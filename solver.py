@@ -634,19 +634,17 @@ class Solver(object):
                     if (cur_step == 0) or (cur_step % self.n_critic != 0):
                         self.reset_grad()
                         loss_D.backward()
-                        self.d_optimizer.step()
                         if self.use_quantum_disc:
-                            for p in self.D.parameters():
-                                p.data.clamp_(-0.5, 0.5)
+                            torch.nn.utils.clip_grad_norm_(self.D.parameters(), max_norm=1.0)
+                        self.d_optimizer.step()
                 else:
                     # training G for n_critic-1 times followed by D one time
                     if (cur_step != 0) and (cur_step % self.n_critic == 0):
                         self.reset_grad()
                         loss_D.backward()
-                        self.d_optimizer.step()
                         if self.use_quantum_disc:
-                            for p in self.D.parameters():
-                                p.data.clamp_(-0.5, 0.5)
+                            torch.nn.utils.clip_grad_norm_(self.D.parameters(), max_norm=1.0)
+                        self.d_optimizer.step()
 
             ########## Train the generator ##########
 
