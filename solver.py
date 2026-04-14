@@ -658,7 +658,7 @@ class Solver(object):
             if self.use_quantum_disc:
                 idx = torch.triu_indices(9, 9, offset=1)
                 fake_bonds_gen = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
-                fake_upper_gen = torch.cat([fake_bonds_gen, nodes_hat], dim=1).float()
+                fake_upper_gen = torch.cat([fake_bonds_gen, nodes_hat[:, :, :5]], dim=1).float()
                 logits_fake = self.D(fake_upper_gen)  # (batch, 1)
                 features_fake = logits_fake
             else:
