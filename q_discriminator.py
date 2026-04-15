@@ -129,7 +129,9 @@ class KaoQuantumDisc(torch.nn.Module):
     def forward(self, x):
         # x: (batch, 45, 5) upper-tri bonds+atoms, or (batch, 225) flat
         x = x.reshape(x.shape[0], -1).float()
-        return self.fc(self.qlayer(x))  # (batch, 1) — unbounded critic score
+        x_cpu = x.cpu()  # quantum circuit runs on CPU
+        out = self.qlayer(x_cpu)
+        return self.fc(out.to(x.device))  # move result back to GPU
 
 
 # Keep SimpleQuantumDisc as alias for backwards compatibility
