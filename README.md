@@ -1,6 +1,11 @@
 # QuantumMolGAN
 
-This is the PyTorch reimplementation of [Exploring the Advantages of Quantum Generative Adversarial Networks in Generative Chemistry]
+A hybrid quantum-classical generative adversarial network for drug-like molecule generation. This project investigates whether replacing the classical discriminator in MolGAN with a quantum circuit (9-qubit, PennyLane) can improve the quality and drug-likeness of generated molecules, evaluated on the GDB-9 and QM9 datasets.
+
+Key contributions of this work:
+- Integration of a 9-qubit quantum discriminator into the MolGAN framework
+- Ablation study comparing classical vs. quantum discriminator performance
+- Evaluation of generated molecule validity, uniqueness, novelty, and drug-likeness (QED)
 
 ## Environment
 
