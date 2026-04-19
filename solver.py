@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import datetime
 from utils.utils import *
 from models.models import Generator, Discriminator
+from q_discriminator import HybridModel as QuantumDiscriminator, KaoQuantumDisc, sanity_check_quantum_disc
 from data.sparse_molecular_dataset import SparseMolecularDataset
 from utils.logger import Logger
 
@@ -22,10 +23,7 @@ from utils.logger import Logger
 from frechetdist import frdist
 
 def upper(m, a):
-    res = torch.zeros((m.shape[0], 36, 6)).to(m.device).long()
-    print("Shape of m:", m.shape)
-    print("Shape of a:", a.shape)
-    print("Shape of res before concatenation:", res.shape)
+    res = torch.zeros((m.shape[0], 36, a.shape[-1])).to(m.device).long()
 
     for i in range(m.shape[0]):
         for j in range(5):
@@ -75,8 +73,25 @@ class Solver(object):
         self.la_gp = config.lambda_gp
         self.post_method = config.post_method
 
-        # RL reward suggested by medicinal chemist
-        self.metric = 'sas,qed,unique'
+        # RL reward settings
+        self.metric = getattr(config, 'metric', 'sas,qed,unique')
+        self.reward_mode = getattr(config, 'reward_mode', 'legacy')
+        self.enable_rl_loss = getattr(config, 'enable_rl_loss', True)
+        self.freeze_g = getattr(config, 'freeze_g', False)
+        self.g_ckpt_dir = getattr(config, 'g_ckpt_dir', None)
+        self.g_resume_epoch = getattr(config, 'g_resume_epoch', None)
+        self.rw_qed = getattr(config, 'rw_qed', 0.35)
+        self.rw_sa = getattr(config, 'rw_sa', 0.35)
+        self.rw_logp = getattr(config, 'rw_logp', 0.0)
+        self.rw_unique = getattr(config, 'rw_unique', 0.15)
+        self.rw_novelty = getattr(config, 'rw_novelty', 0.10)
+        self.rw_clean_valid = getattr(config, 'rw_clean_valid', 0.05)
+        self.rw_fragment_penalty = getattr(config, 'rw_fragment_penalty', 0.20)
+        self.rw_clip_min = getattr(config, 'rw_clip_min', 0.0)
+        self.rw_clip_max = getattr(config, 'rw_clip_max', 1.0)
+        self.use_quantum_disc = getattr(config, 'use_quantum_disc', False)
+        print(f"Quantum discriminator: {self.use_quantum_disc}", flush=True)
+        print(f"Reward mode: {self.reward_mode}, metric: {self.metric}", flush=True)
 
         # Training configurations
         self.batch_size = config.batch_size
@@ -125,6 +140,15 @@ class Solver(object):
         # Build the model
         self.build_model()
 
+        # Quantum discriminator sanity check
+        if self.use_quantum_disc:
+            sanity_check_quantum_disc(self.D, device=str(self.device))
+
+        # Optionally freeze generator params (useful for quantum-D warm-start)
+        if self.freeze_g:
+            for p in self.G.parameters():
+                p.requires_grad = False
+
         # Quantum
         # quantum or not
         if config.quantum:
@@ -162,12 +186,20 @@ class Solver(object):
                            self.data.atom_num_types,
                            self.dropout)
         
-        self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
+        if self.use_quantum_disc:
+            self.D = KaoQuantumDisc()
+            self.n_critic = 10          # override: 10 D steps per G step
+            self.g_lr = 1e-4            # override: slower generator
+            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-4, betas=(0.5, 0.9))
+            print("Using KaoQuantumDisc (9-qubit, Kao et al. 2023)", flush=True)
+        else:
+            self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
+            self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
         self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
 
         # Optimizers can be RMSprop or Adam
+        # (g_lr is already overridden to 1e-4 above if quantum)
         self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), self.g_lr)
-        self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
         self.v_optimizer = torch.optim.RMSprop(self.V.parameters(), self.g_lr)
 
         # Print the networks
@@ -194,13 +226,18 @@ class Solver(object):
             log.info(name)
             log.info("The number of parameters: {}".format(num_params))
 
-    def restore_model(self, resume_iters):
-        """Restore the trained generator and discriminator"""
-        print('Loading the trained models from step {}...'.format(resume_iters))
-        G_path = os.path.join(self.model_dir_path, '{}-G.ckpt'.format(resume_iters))
-        D_path = os.path.join(self.model_dir_path, '{}-D.ckpt'.format(resume_iters))
-        V_path = os.path.join(self.model_dir_path, '{}-V.ckpt'.format(resume_iters))
+    def restore_model(self, resume_iters, load_g_only=False):
+        """Restore trained networks from checkpoints."""
+        ckpt_dir = self.model_dir_path
+        print('Loading checkpoints from {} at step {}...'.format(ckpt_dir, resume_iters))
+        G_path = os.path.join(ckpt_dir, f'{resume_iters}-G.ckpt')
         self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
+
+        if load_g_only:
+            return
+
+        D_path = os.path.join(ckpt_dir, f'{resume_iters}-D.ckpt')
+        V_path = os.path.join(ckpt_dir, f'{resume_iters}-V.ckpt')
         self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
         self.V.load_state_dict(torch.load(V_path, map_location=lambda storage, loc: storage))
 
@@ -332,6 +369,38 @@ class Solver(object):
 
     def reward(self, mols):
         """Calculate the rewards of mols"""
+        if self.reward_mode == 'weighted':
+            qed = MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=False)
+            sa = MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
+            logp = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
+            novelty = MolecularMetrics.novel_scores(mols, self.data).astype(np.float32)
+            unique = MolecularMetrics.unique_scores(mols).astype(np.float32)
+            clean_valid = MolecularMetrics.valid_scores(mols).astype(np.float32)
+
+            weighted_sum = (
+                self.rw_qed * qed +
+                self.rw_sa * sa +
+                self.rw_logp * logp +
+                self.rw_unique * unique +
+                self.rw_novelty * novelty +
+                self.rw_clean_valid * clean_valid
+            )
+            weight_total = (
+                self.rw_qed +
+                self.rw_sa +
+                self.rw_logp +
+                self.rw_unique +
+                self.rw_novelty +
+                self.rw_clean_valid
+            )
+            if weight_total > 0:
+                weighted_sum = weighted_sum / weight_total
+
+            fragment_penalty = 1.0 - clean_valid
+            rr = weighted_sum - self.rw_fragment_penalty * fragment_penalty
+            rr = np.clip(rr, self.rw_clip_min, self.rw_clip_max)
+            return rr.reshape(-1, 1)
+
         rr = 1.
         for m in ('logp,sas,qed,unique' if self.metric == 'all' else self.metric).split(','):
             if m == 'np':
@@ -362,6 +431,15 @@ class Solver(object):
 
         # start training from scratch or resume training
         start_epoch = 0
+        if self.g_resume_epoch is not None:
+            # Warm-start generator only (e.g., from classical run)
+            if self.g_ckpt_dir is not None:
+                self.model_dir_path, orig_model_dir = self.g_ckpt_dir, self.model_dir_path
+            else:
+                orig_model_dir = None
+            self.restore_model(self.g_resume_epoch, load_g_only=True)
+            if orig_model_dir:
+                self.model_dir_path = orig_model_dir
         if self.resume_epoch is not None and self.mode == 'train':
             start_epoch = self.resume_epoch
             self.restore_model(self.resume_epoch)
@@ -443,7 +521,12 @@ class Solver(object):
                 print('[Testing]')
             else:
                 raise NotImplementedError
-        
+
+        # Linear temperature schedule for Gumbel/softmax
+        temp_start = getattr(self, 'gumbel_temp_start', 1.0)
+        temp_end = getattr(self, 'gumbel_temp_end', 1.0)
+        temp = temp_start + (temp_end - temp_start) * (epoch_i / max(1, self.num_epochs - 1))
+
         for a_step in range(the_step):
 
             # non-Quantum part
@@ -494,27 +577,42 @@ class Solver(object):
             cur_step = self.num_steps * epoch_i + a_step
 
             ########## Train the discriminator ##########
-        
-            # compute loss with real inputs
-            logits_real, features_real = self.D(a_tensor, None, x_tensor)
-            
-            # Z-to-target
-            edges_logits, nodes_logits = self.G(z)
-            # Postprocess with Gumbel softmax
-            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
-            
-            logits_fake, features_fake = self.D(edges_hat, None, nodes_hat) 
 
-            # Compute losses for gradient penalty
-            eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
-            x_int0 = (eps * a_tensor + (1. - eps) * edges_hat).requires_grad_(True)
-            x_int1 = (eps.squeeze(-1) * x_tensor + (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
-            grad0, grad1 = self.D(x_int0, None, x_int1)
-            grad_penalty = self.gradient_penalty(grad0, x_int0) + self.gradient_penalty(grad0, x_int1)
-                        
-            d_loss_real = torch.mean(logits_real)
-            d_loss_fake = torch.mean(logits_fake)
-            loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
+            if self.use_quantum_disc:
+                # Upper-triangular bonds + atoms -> (batch, 45, 5) -> 225-dim in disc
+                idx = torch.triu_indices(9, 9, offset=1)
+                real_bonds = a_tensor[:, idx[0], idx[1], :]  # (batch, 36, 5)
+                real_upper = torch.cat([real_bonds, x_tensor[:, :, :5]], dim=1).float()  # (batch, 45, 5)
+                edges_logits, nodes_logits = self.G(z)
+                (edges_hat, nodes_hat) = self.postprocess(
+                    (edges_logits, nodes_logits), self.post_method, temperature=temp)
+                fake_bonds = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
+                fake_upper = torch.cat([fake_bonds, nodes_hat[:, :, :5]], dim=1).float()  # (batch, 45, 5)
+                logits_real = self.D(real_upper)   # (batch, 1)
+                logits_fake = self.D(fake_upper)   # (batch, 1)
+                features_real = logits_real
+                features_fake = logits_fake
+                d_loss_real = torch.mean(logits_real)
+                d_loss_fake = torch.mean(logits_fake)
+                grad_penalty = torch.tensor(0.0).to(self.device)
+                loss_D = -d_loss_real + d_loss_fake
+            else:
+                logits_real, features_real = self.D(a_tensor, None, x_tensor)
+                edges_logits, nodes_logits = self.G(z)
+                (edges_hat, nodes_hat) = self.postprocess(
+                    (edges_logits, nodes_logits), self.post_method, temperature=temp)
+                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
+                eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
+                x_int0 = (eps * a_tensor +
+                          (1. - eps) * edges_hat).requires_grad_(True)
+                x_int1 = (eps.squeeze(-1) * x_tensor +
+                          (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
+                grad0, grad1 = self.D(x_int0, None, x_int1)
+                grad_penalty = (self.gradient_penalty(grad0, x_int0) +
+                                self.gradient_penalty(grad0, x_int1))
+                d_loss_real = torch.mean(logits_real)
+                d_loss_fake = torch.mean(logits_fake)
+                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
             
 
             if cur_la > 0:
@@ -537,21 +635,34 @@ class Solver(object):
                         self.reset_grad()
                         loss_D.backward()
                         self.d_optimizer.step()
+                        if self.use_quantum_disc:
+                            for p in self.D.parameters():
+                                p.data.clamp_(-0.5, 0.5)
                 else:
                     # training G for n_critic-1 times followed by D one time
                     if (cur_step != 0) and (cur_step % self.n_critic == 0):
                         self.reset_grad()
                         loss_D.backward()
                         self.d_optimizer.step()
+                        if self.use_quantum_disc:
+                            for p in self.D.parameters():
+                                p.data.clamp_(-0.5, 0.5)
 
             ########## Train the generator ##########
 
             # Z-to-target
             edges_logits, nodes_logits = self.G(z)
             # Postprocess with Gumbel softmax
-            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
+            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method, temperature=temp)
             
-            logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
+            if self.use_quantum_disc:
+                idx = torch.triu_indices(9, 9, offset=1)
+                fake_bonds_gen = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
+                fake_upper_gen = torch.cat([fake_bonds_gen, nodes_hat[:, :, :5]], dim=1).float()
+                logits_fake = self.D(fake_upper_gen)  # (batch, 1)
+                features_fake = logits_fake
+            else:
+                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
 
             # Value losses (RL)
             value_logit_real, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
@@ -587,8 +698,11 @@ class Solver(object):
 
             print('d_loss {:.2f} d_fake {:.2f} d_real {:.2f} g_loss: {:.2f}'.format(loss_D.item(), d_loss_fake.item(), d_loss_real.item(), loss_G.item()))
             print('======================= {} =============================='.format(datetime.datetime.now()), flush = True)
-            alpha = torch.abs(loss_G.detach() / loss_RL.detach()).detach()
-            train_step_G = cur_la * loss_G# + (1.0 - cur_la) * alpha * loss_RL
+            if self.enable_rl_loss:
+                alpha = torch.abs(loss_G.detach() / (loss_RL.detach() + 1e-8)).detach()
+                train_step_G = cur_la * loss_G + (1.0 - cur_la) * alpha * loss_RL
+            else:
+                train_step_G = cur_la * loss_G
 
             train_step_V = loss_V
 
@@ -626,7 +740,7 @@ class Solver(object):
 
 
             ########## Frechet distribution ##########
-            (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel')
+            (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel', temperature=temp)
             edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
             R = [list(a[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
             F = [list(edges_hard[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
@@ -668,7 +782,8 @@ class Solver(object):
 
                 # Save checkpoints
                 if self.mode == 'train':
-                    if (epoch_i + 1) % self.model_save_step == 0:
+                    # Save once per epoch (at first validation step) instead of every 10 steps.
+                    if a_step == 0 and (epoch_i + 1) % self.model_save_step == 0:
                         self.save_checkpoints(epoch_i=epoch_i)
 
                 # Saving molecule images

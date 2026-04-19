@@ -6,6 +6,9 @@ archived/*
 
 *.sparsedataset
 
+.idea/
+
+
 # misc
 misc/*
 
@@ -19,9 +22,39 @@ data/generated_molecules/
 # results
 results/
 
+original_kao_code/
+
+# ── ADD THESE for your project ────────────────────────────────────────────────
+ 
+# Mac junk
+.DS_Store
+**/.DS_Store
+ 
+# Numpy binary files (real/fake molecule data, too large)
+*.npy
+ 
+# Model checkpoints (very large, not needed in git)
+*.ckpt
+ 
+# Tensorboard logs
+logs/
+ 
+# Molecule images generated during training
+imageresults/
+ 
+# Plots (optional: comment out if you WANT to keep plots in git)
+# results/plots/
+ 
+# Only_d_test real_fake data
+only_d_test/real_fake_a_x/
+ 
+# ──────────────────────────────────────────────────────────────────────────────
+
 # data
 data/NP_score.pkl.gz
+data/NP_score.pkl.gz.1
 data/SA_score.pkl.gz
+data/SA_score.pkl.gz.1
 data/gdb9.sdf
 data/gdb9.sdf.csv
 data/gdb9_9nodes.sparsedataset

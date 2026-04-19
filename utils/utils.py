@@ -1,5 +1,9 @@
 import rdkit
-from pysmiles import read_smiles
+
+try:
+    from pysmiles import read_smiles
+except ModuleNotFoundError:
+    read_smiles = None
 
 import pickle
 import gzip
@@ -44,6 +48,10 @@ class MolecularMetrics(object):
     @staticmethod
     def valid_scores(mols):
         return np.array(list(map(MolecularMetrics.valid_lambda_special, mols)), dtype=np.float32)
+
+    @staticmethod
+    def valid_special_total_score(mols):
+        return MolecularMetrics.valid_scores(mols).mean()
 
     @staticmethod
     def valid_filter(mols):
@@ -258,6 +266,7 @@ def all_scores(mols, data, norm=False, reconstruction=False):
         'drugcand': MolecularMetrics.drugcandidate_scores(mols, data)}.items()}
 
     m1 = {'valid': MolecularMetrics.valid_total_score(mols) * 100,
+          'clean_valid': MolecularMetrics.valid_special_total_score(mols) * 100,
           'unique': MolecularMetrics.unique_total_score(mols) * 100,
           'novel': MolecularMetrics.novel_total_score(mols, data) * 100}
 
@@ -278,7 +287,8 @@ def save_mol_img(mols, f_name='tmp.png', is_test=False):
 
                 rdkit.Chem.Draw.MolToFile(a_mol, f_name)
                 a_smi = Chem.MolToSmiles(a_mol)
-                mol_graph = read_smiles(a_smi)
+                if read_smiles is not None:
+                    mol_graph = read_smiles(a_smi)
 
                 # break only give you one image
                 # break
