@@ -98,40 +98,37 @@ class HybridModel(torch.nn.Module):
 
 
 # --- KaoQuantumDisc ---
-# 9-qubit quantum discriminator matching the reference architecture.
-# Input: upper-triangular bonds + atoms -> (batch, 225) -> pad to 512
-# 9 qubits, 3 StronglyEntanglingLayers, measure ONE qubit (qubit 4)
-# Training: weight clamping +-0.01, loss = d_real + d_fake (same sign)
-# Output: (batch, 1) scalar PauliZ expectation
+# 9-qubit quantum discriminator — Kao et al. 2023 architecture.
+# Input: bonds + nodes concatenated -> flat vector -> AmplitudeEmbedding (pad to 512)
+# 9 qubits, 3 StronglyEntanglingLayers, measure ALL qubits with PauliZ
+# Output: (batch, 1) scalar via Linear(9, 1)
 
 _kao_n_qubits = 9
 _kao_n_layers = 3
-_kao_measured_qubit = 4
 _kao_dev = qml.device("default.qubit", wires=_kao_n_qubits)
 
 @qml.qnode(_kao_dev, interface="torch", diff_method="backprop")
 def _kao_qnode(inputs, weights):
-    qml.templates.AmplitudeEmbedding(inputs, wires=range(_kao_n_qubits),
-                                     pad_with=0.001, normalize=True)
-    qml.templates.StronglyEntanglingLayers(weights, wires=range(_kao_n_qubits))
-    return [qml.expval(qml.PauliZ(wires=_kao_measured_qubit))]
+    qml.AmplitudeEmbedding(inputs, wires=range(9), normalize=True, pad_with=0)
+    qml.StronglyEntanglingLayers(weights, wires=range(9))
+    return [qml.expval(qml.PauliZ(i)) for i in range(9)]
 
 _kao_weight_shapes = {"weights": (_kao_n_layers, _kao_n_qubits, 3)}
 
 
 class KaoQuantumDisc(torch.nn.Module):
-    """9-qubit quantum discriminator — single qubit 4 measured, learned output scaling."""
+    """9-qubit quantum discriminator — Kao et al. 2023. All qubits measured, Linear(9,1) output."""
     def __init__(self):
         super().__init__()
         self.qlayer = qml.qnn.TorchLayer(_kao_qnode, _kao_weight_shapes)
-        self.fc = torch.nn.Linear(1, 1)  # learnable scale+bias; unbounds the [-1,1] PauliZ output
+        self.fc = torch.nn.Linear(9, 1)  # map 9 PauliZ measurements to scalar critic score
 
     def forward(self, x):
-        # x: (batch, 45, 5) upper-tri bonds+atoms, or (batch, 225) flat
+        # x: (batch, 45, 5) upper-tri bonds+atoms, or flat vector
         x = x.reshape(x.shape[0], -1).float()
         x_cpu = x.cpu()  # quantum circuit runs on CPU
         out = self.qlayer(x_cpu)
-        return self.fc(out.to(x.device))  # move result back to GPU
+        return self.fc(out.to(x.device))  # (batch, 1)
 
 
 # Keep SimpleQuantumDisc as alias for backwards compatibility

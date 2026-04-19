@@ -190,7 +190,7 @@ class Solver(object):
             self.D = KaoQuantumDisc()
             self.n_critic = 10          # override: 10 D steps per G step
             self.g_lr = 1e-4            # override: slower generator
-            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-3, betas=(0.5, 0.9))
+            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-4, betas=(0.5, 0.9))
             print("Using KaoQuantumDisc (9-qubit, Kao et al. 2023)", flush=True)
         else:
             self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
@@ -634,17 +634,19 @@ class Solver(object):
                     if (cur_step == 0) or (cur_step % self.n_critic != 0):
                         self.reset_grad()
                         loss_D.backward()
-                        if self.use_quantum_disc:
-                            torch.nn.utils.clip_grad_norm_(self.D.parameters(), max_norm=1.0)
                         self.d_optimizer.step()
+                        if self.use_quantum_disc:
+                            for p in self.D.parameters():
+                                p.data.clamp_(-0.5, 0.5)
                 else:
                     # training G for n_critic-1 times followed by D one time
                     if (cur_step != 0) and (cur_step % self.n_critic == 0):
                         self.reset_grad()
                         loss_D.backward()
-                        if self.use_quantum_disc:
-                            torch.nn.utils.clip_grad_norm_(self.D.parameters(), max_norm=1.0)
                         self.d_optimizer.step()
+                        if self.use_quantum_disc:
+                            for p in self.D.parameters():
+                                p.data.clamp_(-0.5, 0.5)
 
             ########## Train the generator ##########
 
