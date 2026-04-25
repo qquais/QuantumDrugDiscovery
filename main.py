@@ -19,7 +19,8 @@ def main():
     # ---- Kao et al. 2023 Table 1 — 150-epoch QuMolGAN (quantum noise generator) ----
 
     # Dataset
-    config.mol_data_dir = 'data/qm9_5k.sparsedataset'
+    # config.mol_data_dir = 'data/qm9_5k.sparsedataset'
+    config.mol_data_dir = '/scratch/gilbreth/quaiqa01/QuantumDrugDiscovery/data/qm9_5k_py37.sparsedataset'
 
     # Quantum (ON — QuMolGAN noise generator, Kao et al. 2023 Table 1)
     config.quantum = True
