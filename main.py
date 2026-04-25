@@ -37,7 +37,7 @@ def main():
     config.g_conv_dim = [16]        # 'hr' → [16]
     config.batch_size = 16
     config.z_dim = 4                # must equal qubits (circuit output dim = z dim)
-    config.num_epochs = 30
+    config.num_epochs = 300
     config.n_critic = 5
     config.critic_type = 'D'
     # config.lambda_wgan = 1.0        # pure WGAN (alpha=1.0)
@@ -47,6 +47,7 @@ def main():
     config.g_lr = 0.001
     config.d_lr = 0.001
     config.use_quantum_disc = False
+    config.resume_epoch = None      # change to epoch number when resuming
 
 
 
@@ -79,7 +80,7 @@ def main():
     # Directories
     run_id = get_date_postfix()
     # config.saving_dir = os.path.join('results/quantum/GAN', run_id)
-    config.saving_dir = os.path.join('results/quantum_ablationB/GAN', run_id)  # was quantum/GAN
+    config.saving_dir = os.path.join('results/quantum_ablationB_300/GAN', run_id)
     config.log_dir_path = os.path.join(config.saving_dir, 'train', 'log_dir')
     config.model_dir_path = os.path.join(config.saving_dir, 'train', 'model_dir')
     config.img_dir_path = os.path.join(config.saving_dir, 'train', 'img_dir')
