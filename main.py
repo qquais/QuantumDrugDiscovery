@@ -35,7 +35,7 @@ def main():
     config.g_conv_dim = [16]        # 'hr' → [16]
     config.batch_size = 16
     config.z_dim = 4                # must equal qubits (circuit output dim = z dim)
-    config.num_epochs = 150
+    config.num_epochs = 30
     config.n_critic = 5
     config.critic_type = 'D'
     config.lambda_wgan = 1.0        # pure WGAN (alpha=1.0)
