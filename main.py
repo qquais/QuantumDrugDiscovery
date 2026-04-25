@@ -16,16 +16,16 @@ def main():
     cudnn.benchmark = True
     config = get_GAN_config()
 
-    # ---- Kao et al. 2023 Table 4 — 30-epoch classical MolGAN-HR baseline ----
+    # ---- Kao et al. 2023 Table 1 — 150-epoch QuMolGAN (quantum noise generator) ----
 
     # Dataset
     config.mol_data_dir = 'data/qm9_5k.sparsedataset'
 
-    # Quantum (OFF for classical baseline)
-    config.quantum = False
-    config.qubits = 8
+    # Quantum (ON — QuMolGAN noise generator, Kao et al. 2023 Table 1)
+    config.quantum = True
+    config.qubits = 4               # must equal z_dim: circuit returns qubits values → z
     config.layer = 3
-    config.update_qc = False
+    config.update_qc = True
     config.qc_lr = 0.04
 
     # Training
@@ -33,11 +33,11 @@ def main():
     config.complexity = 'hr'
     config.g_conv_dim = [16]        # 'hr' → [16]
     config.batch_size = 16
-    config.z_dim = 4
-    config.num_epochs = 30
+    config.z_dim = 4                # must equal qubits (circuit output dim = z dim)
+    config.num_epochs = 150
     config.n_critic = 5
     config.critic_type = 'D'
-    config.lambda_wgan = 1.0        # pure WGAN (alpha=1.0, Table 4)
+    config.lambda_wgan = 1.0        # pure WGAN (alpha=1.0)
     config.lambda_gp = 10.0
     config.decay_every_epoch = None
     config.g_lr = 0.001
@@ -72,7 +72,7 @@ def main():
 
     # Directories
     run_id = get_date_postfix()
-    config.saving_dir = os.path.join('results/classical/GAN', run_id)
+    config.saving_dir = os.path.join('results/quantum/GAN', run_id)
     config.log_dir_path = os.path.join(config.saving_dir, 'train', 'log_dir')
     config.model_dir_path = os.path.join(config.saving_dir, 'train', 'model_dir')
     config.img_dir_path = os.path.join(config.saving_dir, 'train', 'img_dir')
