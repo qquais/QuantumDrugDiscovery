@@ -81,8 +81,8 @@ def get_GAN_config():
     parser.add_argument('--model_save_step', type=int, default=1)
 
     # Tensorboard
-    parser.add_argument('--use_tensorboard', type=str2bool, default=True)
-
+    # parser.add_argument('--use_tensorboard', type=str2bool, default=True)
+    parser.add_argument('--use_tensorboard', type=str2bool, default=False)
     config = parser.parse_args()
 
     return config
