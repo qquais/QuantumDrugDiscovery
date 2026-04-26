@@ -47,7 +47,7 @@ def main():
     config.g_lr = 0.001
     config.d_lr = 0.001
     config.use_quantum_disc = False
-    config.resume_epoch = None      # change to epoch number when resuming
+    config.resume_epoch = 141      # change to epoch number when resuming
 
 
 
@@ -78,16 +78,18 @@ def main():
         config.gen_circuit = None
 
     # Directories
-    run_id = get_date_postfix()
+    # run_id = get_date_postfix()
     # config.saving_dir = os.path.join('results/quantum/GAN', run_id)
-    config.saving_dir = os.path.join('results/quantum_ablationB_300/GAN', run_id)
+    # config.saving_dir = os.path.join('results/quantum_ablationB_300/GAN', run_id)
+    config.saving_dir = 'results/quantum_ablationB_300/GAN/20260425_191533'
     config.log_dir_path = os.path.join(config.saving_dir, 'train', 'log_dir')
     config.model_dir_path = os.path.join(config.saving_dir, 'train', 'model_dir')
     config.img_dir_path = os.path.join(config.saving_dir, 'train', 'img_dir')
     for d in [config.log_dir_path, config.model_dir_path, config.img_dir_path]:
         os.makedirs(d, exist_ok=True)
 
-    log_name = os.path.join(config.log_dir_path, f'{run_id}_logger.log')
+    # log_name = os.path.join(config.log_dir_path, f'{run_id}_logger.log')
+    log_name = os.path.join(config.log_dir_path, 'resume_141_logger.log')
     logging.basicConfig(filename=log_name, level=logging.INFO)
     logging.info(config)
 
