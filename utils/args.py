@@ -50,6 +50,13 @@ def get_GAN_config():
                         help='penalty weight for fragmented/wildcard/invalid molecules')
     parser.add_argument('--rw_clip_min', type=float, default=0.0, help='minimum clipped reward')
     parser.add_argument('--rw_clip_max', type=float, default=1.0, help='maximum clipped reward')
+    parser.add_argument('--reward_preset', type=str, default='ablation_b',
+                        choices=['ablation_b', 'ablation_b_clean'],
+                        help='ablation_b = current rw_* defaults; ablation_b_clean = boosted '
+                             'rw_clean_valid/rw_fragment_penalty to push clean-validity off zero')
+
+    # Reproducibility
+    parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
 
     # Training configuration
     parser.add_argument('--batch_size', type=int, default=128, help='mini-batch size')

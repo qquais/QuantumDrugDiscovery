@@ -15,6 +15,7 @@ Run from the project root:
 import os
 import sys
 import argparse
+import json
 import random
 import warnings
 import time
@@ -202,6 +203,24 @@ def print_summary(df, n_show=20):
     print()
 
 
+def select_best_epoch(df):
+    """
+    Fixed, pre-declared checkpoint-selection rule (not post-hoc cherry-picking):
+    among epochs achieving the sweep's max clean_validity, pick the one with
+    highest uniqueness; if clean_validity is 0 everywhere, fall back to the
+    highest uniqueness among epochs with validity >= 0.5.
+    Returns the selected row as a pandas Series.
+    """
+    max_clean = df['clean_validity'].max()
+    if max_clean > 0:
+        candidates = df[df['clean_validity'] == max_clean]
+    else:
+        candidates = df[df['validity'] >= 0.5]
+        if candidates.empty:
+            candidates = df
+    return candidates.sort_values('uniqueness', ascending=False).iloc[0]
+
+
 def save_sweep_chart(df, output_path):
     """Line plot of all metrics across epochs."""
     df_s = df.sort_values('epoch')
@@ -245,6 +264,12 @@ def main():
     parser.add_argument('--analysis_dir',default=ANALYSIS_DIR)
     parser.add_argument('--max_epoch',   type=int, default=MAX_EPOCH)
     parser.add_argument('--n_generate',  type=int, default=N_GENERATE)
+    parser.add_argument('--seed',        type=int, default=None,
+                        help='seed used for the training run being swept (metadata only, '
+                             'tagged into best_epoch_summary.json)')
+    parser.add_argument('--reward_preset', type=str, default=None,
+                        help='reward preset used for the training run being swept '
+                             '(metadata only, tagged into best_epoch_summary.json)')
     args = parser.parse_args()
 
     os.makedirs(args.analysis_dir, exist_ok=True)
@@ -338,6 +363,27 @@ def main():
 
     # ---- Summary ----
     print_summary(df, n_show=20)
+
+    # ---- Fixed-rule best-epoch selection + JSON summary ----
+    best = select_best_epoch(df)
+    summary = {
+        'seed':           args.seed,
+        'reward_preset':  args.reward_preset,
+        'model_dir':      args.model_dir,
+        'n_generate':     args.n_generate,
+        'epoch':          int(best['epoch']),
+        'validity':       float(best['validity']),
+        'clean_validity': float(best['clean_validity']),
+        'uniqueness':     float(best['uniqueness']),
+        'novelty':        float(best['novelty']),
+        'QED':            float(best['QED']),
+        'SA':             float(best['SA']),
+    }
+    summary_path = os.path.join(args.analysis_dir, 'best_epoch_summary.json')
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f'Best-epoch summary (fixed selection rule) saved → {summary_path}')
+    print(json.dumps(summary, indent=2))
 
     # ---- Chart ----
     chart_path = os.path.join(args.analysis_dir, 'epoch_sweep.png')

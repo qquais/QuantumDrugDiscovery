@@ -1,9 +1,9 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import logging
 import random
 import numpy as np
+import torch
 
 from rdkit import RDLogger
 from utils.args import get_GAN_config
@@ -17,6 +17,17 @@ lg.setLevel(RDLogger.CRITICAL)
 def main():
     cudnn.benchmark = True
     config = get_GAN_config()
+
+    # Seed before any model/weight construction — VQC init weights use np.random.rand,
+    # and nn.Module init draws from torch's global RNG.
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed_all(config.seed)
+
+    if config.reward_preset == 'ablation_b_clean':
+        config.rw_clean_valid = 0.20
+        config.rw_fragment_penalty = 0.35
 
     # ---- Kao et al. 2023 Table 1 — 150-epoch QuMolGAN (quantum noise generator) ----
 
@@ -47,9 +58,7 @@ def main():
     config.g_lr = 0.001
     config.d_lr = 0.001
     config.use_quantum_disc = False
-    config.resume_epoch = 141      # change to epoch number when resuming
-
-
+    # config.resume_epoch is CLI-driven (--resume_epoch); left as parsed (default None)
 
     # Quantum circuit (defined but never called when quantum=False)
     try:
@@ -77,19 +86,17 @@ def main():
         print(f"PennyLane unavailable ({e}); proceeding without gen_circuit.")
         config.gen_circuit = None
 
-    # Directories
-    # run_id = get_date_postfix()
-    # config.saving_dir = os.path.join('results/quantum/GAN', run_id)
-    # config.saving_dir = os.path.join('results/quantum_ablationB_300/GAN', run_id)
-    config.saving_dir = 'results/quantum_ablationB_300/GAN/20260425_191533'
+    # Directories — config.saving_dir is CLI-driven (--saving_dir), unique per
+    # seed/preset job; train/{log,model,img}_dir live directly under it (no extra
+    # timestamp subfolder needed since each job's saving_dir is already unique).
     config.log_dir_path = os.path.join(config.saving_dir, 'train', 'log_dir')
     config.model_dir_path = os.path.join(config.saving_dir, 'train', 'model_dir')
     config.img_dir_path = os.path.join(config.saving_dir, 'train', 'img_dir')
     for d in [config.log_dir_path, config.model_dir_path, config.img_dir_path]:
         os.makedirs(d, exist_ok=True)
 
-    # log_name = os.path.join(config.log_dir_path, f'{run_id}_logger.log')
-    log_name = os.path.join(config.log_dir_path, 'resume_141_logger.log')
+    run_id = get_date_postfix()
+    log_name = os.path.join(config.log_dir_path, f'seed{config.seed}_{config.reward_preset}_{run_id}_logger.log')
     logging.basicConfig(filename=log_name, level=logging.INFO)
     logging.info(config)
 
