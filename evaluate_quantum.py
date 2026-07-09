@@ -110,11 +110,17 @@ def load_gen_weights(model_dir, epoch):
     """
     Read gen_weights from molgan_red_weights.csv.
     Solver saves row [epoch_i, w0, ..., w_n] where epoch_i = epoch - 1 (0-based).
-    load_gen_weights(epoch) reads iloc[epoch-1, 1:].
+    Rows are matched by the epoch_i label in column 0, not by file position:
+    save_checkpoints can append more than one row per epoch_i (e.g. resumed
+    runs re-saving an already-written epoch), which desyncs plain positional
+    indexing from the intended epoch as soon as any duplicate precedes it.
     """
     weights_path = os.path.join(model_dir, 'molgan_red_weights.csv')
     df = pd.read_csv(weights_path, header=None)
-    weights = df.iloc[epoch - 1, 1:].values.astype(float)
+    matches = df[df[0] == epoch - 1]
+    if len(matches) == 0:
+        raise ValueError(f'No gen_weights row for epoch_i={epoch - 1} in {weights_path}')
+    weights = matches.iloc[-1, 1:].values.astype(float)
     return torch.tensor(list(weights), requires_grad=False)
 
 
@@ -130,7 +136,10 @@ def generate_molecules(G, gen_circuit, gen_weights, data, n_generate, batch_size
         cur_batch = min(batch_size, n_generate - len(all_mols))
 
         # Quantum noise: batch_size circuit evaluations stacked → (batch, qubits)
+        # PennyLane returns a list of per-wire tensors (not a single stacked
+        # tensor) when the qnode has multiple qml.expval outputs.
         sample_list = [gen_circuit(gen_weights) for _ in range(cur_batch)]
+        sample_list = [torch.stack(s) if isinstance(s, list) else s for s in sample_list]
         z = torch.stack(tuple(sample_list)).to(device).float()
 
         with torch.no_grad():

@@ -783,7 +783,11 @@ class Solver(object):
                 # Save checkpoints
                 if self.mode == 'train':
                     # Save once per epoch (at first validation step) instead of every 10 steps.
-                    if a_step == 0 and (epoch_i + 1) % self.model_save_step == 0:
+                    # train_val_test == 'val' guard is required: this block also runs during
+                    # the 'train' pass's a_step==0, so without it every epoch was saved twice
+                    # (once from 'train', once from 'val'), duplicating rows in
+                    # molgan_red_weights.csv and desyncing positional epoch lookups from it.
+                    if train_val_test == 'val' and a_step == 0 and (epoch_i + 1) % self.model_save_step == 0:
                         self.save_checkpoints(epoch_i=epoch_i)
 
                 # Saving molecule images

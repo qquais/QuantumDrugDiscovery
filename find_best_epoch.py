@@ -111,7 +111,10 @@ def generate_molecules(G, gen_circuit, gen_weights, data, n_generate, batch_size
 
     for _ in range(n_batches):
         cur_batch = min(batch_size, n_generate - len(all_mols))
+        # PennyLane returns a list of per-wire tensors (not a single stacked
+        # tensor) when the qnode has multiple qml.expval outputs.
         sample_list = [gen_circuit(gen_weights) for _ in range(cur_batch)]
+        sample_list = [torch.stack(s) if isinstance(s, list) else s for s in sample_list]
         z = torch.stack(tuple(sample_list)).to(device).float()
 
         with torch.no_grad():
@@ -206,19 +209,18 @@ def print_summary(df, n_show=20):
 def select_best_epoch(df):
     """
     Fixed, pre-declared checkpoint-selection rule (not post-hoc cherry-picking):
-    among epochs achieving the sweep's max clean_validity, pick the one with
-    highest uniqueness; if clean_validity is 0 everywhere, fall back to the
-    highest uniqueness among epochs with validity >= 0.5.
+    maximize clean_validity * uniqueness. Taking the max of either metric
+    alone is degenerate at the extremes: an early, heavily mode-collapsed
+    checkpoint can hit clean_validity == 1.0 by always emitting the same
+    trivial molecule (uniqueness ~= 0), and a late, unstable checkpoint can
+    show high uniqueness while validity/clean_validity have collapsed. The
+    product only scores well when both quality and diversity are present
+    simultaneously.
     Returns the selected row as a pandas Series.
     """
-    max_clean = df['clean_validity'].max()
-    if max_clean > 0:
-        candidates = df[df['clean_validity'] == max_clean]
-    else:
-        candidates = df[df['validity'] >= 0.5]
-        if candidates.empty:
-            candidates = df
-    return candidates.sort_values('uniqueness', ascending=False).iloc[0]
+    scored = df.copy()
+    scored['selection_score'] = scored['clean_validity'] * scored['uniqueness']
+    return scored.sort_values('selection_score', ascending=False).iloc[0]
 
 
 def save_sweep_chart(df, output_path):
@@ -319,9 +321,12 @@ def main():
         # Reload G weights (in-place; no re-allocation)
         G.load_state_dict(torch.load(ckpt_path, map_location=device))
 
-        # Get gen_weights for this epoch
-        if weights_df is not None and (epoch - 1) < len(weights_df):
-            row_vals = weights_df.iloc[epoch - 1, 1:].values.astype(float)
+        # Get gen_weights for this epoch. Match by the epoch_i label in column
+        # 0, not by file position: duplicate rows for an epoch_i (e.g. from
+        # resumed runs) desync positional indexing from the intended epoch.
+        row_matches = weights_df[weights_df[0] == epoch - 1] if weights_df is not None else None
+        if row_matches is not None and len(row_matches) > 0:
+            row_vals = row_matches.iloc[-1, 1:].values.astype(float)
             gen_weights = torch.tensor(list(row_vals), requires_grad=False)
         else:
             n_w = LAYERS * (QUBITS * 2 - 1)
