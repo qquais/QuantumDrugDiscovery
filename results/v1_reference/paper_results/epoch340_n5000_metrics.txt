@@ -1,0 +1,14 @@
+Epoch-300 RDKit Evaluation (GDB9 baseline)
+Total samples: 5000
+Validity fraction:   0.756
+Clean validity frac: 0.568
+Uniqueness fraction: 0.569
+Novelty fraction:    0.739
+
+Valid smiles count:  3780
+Contains "." count:  916
+Contains "*" count:  680
+
+QED  : mean=0.346, std=0.206, min=0.000
+logP : mean=-0.674, std=1.553, min=-3.000
+SA   : mean=6.161, std=2.376, min=1.733

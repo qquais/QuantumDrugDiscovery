@@ -1,0 +1,19 @@
+Run: results/classical/experiments/ablation_C
+Checkpoint: results/classical/experiments/ablation_C/model_dir/330-G.ckpt
+Dataset: data/gdb9_9nodes.sparsedataset
+Samples: 5000
+Post method: softmax
+Generator dims: z_dim=8, g_conv_dim=[128]
+
+Validity fraction:   0.765
+Clean validity frac: 0.692
+Uniqueness fraction: 0.540
+Novelty fraction:    0.725
+
+Valid smiles count:  3825
+Contains "." count:  355
+Contains "*" count:  13
+
+QED  : mean=0.366, std=0.212, min=0.000
+logP : mean=-0.398, std=1.697, min=-3.000
+SA   : mean=5.558, std=2.585, min=1.726
