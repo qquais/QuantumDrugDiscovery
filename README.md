@@ -29,6 +29,27 @@ in **[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)**; the methodological
 requirements each part of the design satisfies are in
 **[docs/METHODOLOGY.md](docs/METHODOLOGY.md)**.
 
+## Datasets
+
+Neither dataset is in git. GDB-9 downloads with the helper script; both are then
+preprocessed into the sparse format the pipeline loads.
+
+```bash
+cd data && bash download_dataset.sh          # GDB-9 + the NP/SA score tables
+python sparse_molecular_dataset.py           # writes *.sparsedataset
+```
+
+`data/qm9_5k.smi` (the 5,000-molecule QM9 subset used for the main comparison)
+ships with the repository. The preprocessing script's `main` block selects which
+dataset to build; edit it to choose between `gdb9_9nodes` and `qm9_5k`.
+
+Two files are produced and referenced throughout:
+
+| file | molecules | used by |
+|---|---|---|
+| `data/qm9_5k_py37.sparsedataset` | 4,994 | the T1-T6 comparison |
+| `data/gdb9_9nodes.sparsedataset` | ~133k | the T7 scale check |
+
 ## What the pipeline guarantees
 
 Every defect in v1 came from the same root cause: a metric could be computed
@@ -109,3 +130,12 @@ The quantum noise-generator circuit follows Kao et al., *Exploring the
 advantages of quantum generative adversarial networks in generative chemistry*,
 JCIM 63:3307-3318, 2023. The backbone follows De Cao & Kipf, *MolGAN*, 2018,
 with WGAN-GP from Gulrajani et al., 2017.
+
+## Credits
+
+This repository builds on:
+
+- [nicola-decao/MolGAN](https://github.com/nicola-decao/MolGAN)
+- [ZhenyueQin/Implementation-MolGAN-PyTorch](https://github.com/ZhenyueQin/Implementation-MolGAN-PyTorch)
+- [jundeli/quantum-gan](https://github.com/jundeli/quantum-gan)
+- [pykao/QuantumMolGAN-PyTorch](https://github.com/pykao/QuantumMolGAN-PyTorch)

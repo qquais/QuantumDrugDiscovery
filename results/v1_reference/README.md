@@ -9,9 +9,16 @@ Specifically:
 
 * `metrics_corrected/`, `paper_results/`, `quantum_metrics/` — computed with
   the v1 decoder, so clean-validity is a graph-size measurement, not a
-  chemistry one. `quantum_metrics/*epoch30*` also records
+  chemistry one, and novelty is measured against train+val+test rather than the
+  training split (ERRATA D2). `quantum_metrics/*epoch30*` also records
   `z_dim=8, g_conv_dim=[128,256,512]`, i.e. the *classical* architecture, while
   v1 reports that row as the quantum model (ERRATA D5).
+* `paper_results/*.png` — property distribution plots for the same v1 runs,
+  drawn over the un-filtered "valid" set. These lived at the repository root as
+  `paper_results/` on `main`; they were moved here so that the v1 numbers exist
+  in exactly one place, with this warning attached. The `.txt` files that came
+  with them were byte-identical to the ones already here and were dropped as
+  duplicates.
 * `quantum_ablationB_epoch_sweep.csv`, `best_epoch_summary.json`,
   `quantum_results.csv` — a partially-corrected re-sweep run after the padding
   fix but before the protocol existed: selection and reporting share a noise
