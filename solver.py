@@ -1,816 +1,456 @@
-from collections import defaultdict
+"""Training loop for classical and quantum MolGAN variants.
+
+Rewritten from the original `solver_legacy.py` (kept for reference) to fix
+the reporting defects found in the v1 audit (docs/ERRATA.md):
+
+* Training-time "scores" were computed on the *training batch* of 16
+  molecules every 10 steps. Uniqueness over 16 samples is near 1 by
+  construction; that is where the withdrawn 73% uniqueness came from. This
+  version evaluates a fixed, seeded validation sample of `val_n` molecules
+  once per epoch and writes it to history.csv, and the header of that file
+  says what n was.
+* Reported SA/logP were the [0,1]-normalised reward-space versions. Raw
+  values are logged now; normalisation lives only inside the reward.
+* Per-metric means were taken over `np.nonzero(v)`, silently dropping every
+  molecule that scored exactly 0 and biasing every average upward.
+* The latent source is now a `qmolgan.latent.LatentSampler`, so classical,
+  bounded-classical, rank-matched-classical and quantum runs share one code
+  path and differ only in the sampler.
+* Circuit weights are checkpointed as `{epoch}-Z.ckpt` state dicts instead of
+  appended CSV rows (which desynced from epochs whenever a run was resumed).
+"""
 
 import csv
+import datetime
+import json
 import os
 import time
-import datetime
+from collections import defaultdict
+
 import numpy as np
-import pandas as pd
-
-import pennylane as qml
-import random
-
 import torch
 import torch.nn.functional as F
-import datetime
-from utils.utils import *
-from models.models import Generator, Discriminator
-from q_discriminator import HybridModel as QuantumDiscriminator, KaoQuantumDisc, sanity_check_quantum_disc
+
 from data.sparse_molecular_dataset import SparseMolecularDataset
+from models.models import Generator, Discriminator
+from qmolgan import chem, generate as gen_utils, rewards as reward_utils
+from qmolgan.latent import make_latent
 from utils.logger import Logger
-
-
-from frechetdist import frdist
-
-def upper(m, a):
-    res = torch.zeros((m.shape[0], 36, a.shape[-1])).to(m.device).long()
-
-    for i in range(m.shape[0]):
-        for j in range(5):
-            tmp_m = m[i, :, :, j]
-            idx = torch.triu_indices(9, 9,offset = 1)
-
-            res[i, :, j] = tmp_m[list(idx)]
-    res = torch.cat((res, a), dim=1)
-    return res        
+from utils.utils import MolecularMetrics, save_mol_img
 
 
 class Solver(object):
-    """Solver for training and testing MolGAN"""
+    """Trains one MolGAN variant and logs an honest per-epoch history."""
 
     def __init__(self, config, log=None):
-        """Initialize configurations"""
-
-        # Log
+        self.config = config
         self.log = log
 
-        # Data loader
+        # ---- Data -------------------------------------------------------
         self.data = SparseMolecularDataset()
         self.data.load(config.mol_data_dir)
+        self.train_smiles = set(gen_utils.training_smiles(self.data))
 
-        # Quantum
-        self.quantum = config.quantum
-        self.layer = config.layer
-        self.qubits = config.qubits
-        # self.gen_circuit = config.gen_circuit
-        # Quantum
-        #  Did changes for checkpoints remove when training have to be done from line 60 to 62.
-        self.gen_circuit = getattr(config, "gen_circuit", None)
-        if self.gen_circuit is None:
-            print("⚠️ Warning: 'gen_circuit' not found in config. Proceeding without it.")
-
-        self.update_qc = config.update_qc
-        self.qc_lr = config.qc_lr
-        self.qc_pretrained = config.qc_pretrained
-
-        # Model configurations
+        # ---- Model shape -------------------------------------------------
         self.z_dim = config.z_dim
         self.m_dim = self.data.atom_num_types
         self.b_dim = self.data.bond_num_types
         self.g_conv_dim = config.g_conv_dim
         self.d_conv_dim = config.d_conv_dim
-        self.la = config.lambda_wgan
-        self.la_gp = config.lambda_gp
+        self.dropout = config.dropout
         self.post_method = config.post_method
 
-        # RL reward settings
-        self.metric = getattr(config, 'metric', 'sas,qed,unique')
-        self.reward_mode = getattr(config, 'reward_mode', 'legacy')
-        self.enable_rl_loss = getattr(config, 'enable_rl_loss', True)
-        self.freeze_g = getattr(config, 'freeze_g', False)
-        self.g_ckpt_dir = getattr(config, 'g_ckpt_dir', None)
-        self.g_resume_epoch = getattr(config, 'g_resume_epoch', None)
-        self.rw_qed = getattr(config, 'rw_qed', 0.35)
-        self.rw_sa = getattr(config, 'rw_sa', 0.35)
-        self.rw_logp = getattr(config, 'rw_logp', 0.0)
-        self.rw_unique = getattr(config, 'rw_unique', 0.15)
-        self.rw_novelty = getattr(config, 'rw_novelty', 0.10)
-        self.rw_clean_valid = getattr(config, 'rw_clean_valid', 0.05)
-        self.rw_fragment_penalty = getattr(config, 'rw_fragment_penalty', 0.20)
-        self.rw_clip_min = getattr(config, 'rw_clip_min', 0.0)
-        self.rw_clip_max = getattr(config, 'rw_clip_max', 1.0)
-        self.use_quantum_disc = getattr(config, 'use_quantum_disc', False)
-        print(f"Quantum discriminator: {self.use_quantum_disc}", flush=True)
-        print(f"Reward mode: {self.reward_mode}, metric: {self.metric}", flush=True)
+        # ---- Objective ---------------------------------------------------
+        self.la = config.lambda_wgan
+        self.la_gp = config.lambda_gp
+        self.reward_mode = config.reward_mode
+        self.metric = config.metric
+        self.enable_rl_loss = config.enable_rl_loss
+        self.reward_weights = {k: float(getattr(config, k))
+                               for k in reward_utils.REWARD_KEYS}
+        self.rw_clip = (config.rw_clip_min, config.rw_clip_max)
 
-        # Training configurations
+        # ---- Training ----------------------------------------------------
         self.batch_size = config.batch_size
         self.num_epochs = config.num_epochs
-        # number of steps per epoch
-        self.num_steps =  (len(self.data) // self.batch_size)
+        self.num_steps = max(1, len(self.data) // self.batch_size)
         self.g_lr = config.g_lr
         self.d_lr = config.d_lr
-        self.dropout = config.dropout
-        # learning rate decay
         self.gamma = config.gamma
         self.decay_every_epoch = config.decay_every_epoch
-
-        # critic
-        if self.la > 0:
-            self.n_critic = config.n_critic
-        else:
-            self.n_critic = 1
+        self.n_critic = config.n_critic if self.la > 0 else 1
         self.critic_type = config.critic_type
-
-        # Training or test
         self.mode = config.mode
         self.resume_epoch = config.resume_epoch
+        self.model_save_step = config.model_save_step
+        self.seed = config.seed
 
-        # Testing configurations
-        self.test_epoch = config.test_epoch
-        self.test_sample_size = config.test_sample_size
+        # Honest per-epoch validation: a fixed number of freshly generated
+        # molecules, always the same count, always the same noise seed, so the
+        # per-epoch curve is comparable across epochs, runs and models.
+        self.val_n = config.val_n
+        self.val_seed = config.val_seed
+        self.val_every = max(1, config.val_every)
 
-        # Tensorboard
-        self.use_tensorboard = config.use_tensorboard
-        if self.mode == 'train' and config.use_tensorboard:
-            self.logger = Logger(config.log_dir_path)
+        self.gumbel_temp_start = config.gumbel_temp_start
+        self.gumbel_temp_end = config.gumbel_temp_end
 
-        # GPU
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print('Device: ', self.device, flush = True)
+        print(f'Device: {self.device}', flush=True)
 
-        # Directories
         self.log_dir_path = config.log_dir_path
         self.model_dir_path = config.model_dir_path
         self.img_dir_path = config.img_dir_path
+        self.history_path = os.path.join(config.saving_dir, 'history.csv')
 
-        # Step size to save the model
-        self.model_save_step = config.model_save_step
+        self.use_tensorboard = config.use_tensorboard
+        self.logger = Logger(self.log_dir_path) if (self.mode == 'train'
+                                                    and self.use_tensorboard) else None
 
-        # Build the model
         self.build_model()
 
-        # Quantum discriminator sanity check
-        if self.use_quantum_disc:
-            sanity_check_quantum_disc(self.D, device=str(self.device))
-
-        # Optionally freeze generator params (useful for quantum-D warm-start)
-        if self.freeze_g:
-            for p in self.G.parameters():
-                p.requires_grad = False
-
-        # Quantum
-        # quantum or not
-        if config.quantum:
-
-            # use pretrained weights or not
-            if config.qc_pretrained:
-                self.pretrained_qc_weights = pd.read_csv('results/quantum_circuit/molgan_red_weights.csv', header=None).iloc[-1, 1:].values
-                self.gen_weights = torch.tensor(list(self.pretrained_qc_weights), requires_grad=True)
-            else:
-                self.gen_weights = torch.tensor(list(np.random.rand(config.layer*(config.qubits*2-1))*2*np.pi-np.pi), requires_grad=True)
-
-            # learning rate of quantum circuit
-            # the learning rate of quantum circuit is different from the learning rate of generator
-            if self.update_qc:
-                if self.qc_lr:
-                    # can use either torch.optim.Adam or torch.optim.RMSprop
-                    self.g_optimizer = torch.optim.RMSprop([
-                        {'params':list(self.G.parameters())},
-                        {'params': [self.gen_weights], 'lr': self.qc_lr}
-                    ], lr=self.g_lr)
-                else:
-                    # can use either torch.optim.Adam or torch.optim.RMSprop
-                    self.g_optimizer = torch.optim.RMSprop(list(self.G.parameters())+[self.gen_weights], self.g_lr)
-            else:
-                # can use either torch.optim.Adam or torch.optim.RMSprop
-                self.g_optimizer = torch.optim.RMSprop(list(self.G.parameters()), self.g_lr)
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
 
     def build_model(self):
-        """Create a generator, a discriminator and a v net"""
+        self.G = Generator(self.g_conv_dim, self.z_dim, self.data.vertexes,
+                           self.data.bond_num_types, self.data.atom_num_types,
+                           self.dropout).to(self.device)
+        self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1,
+                               dropout_rate=self.dropout).to(self.device)
+        self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1,
+                               dropout_rate=self.dropout).to(self.device)
 
-        # Models
-        self.G = Generator(self.g_conv_dim, self.z_dim,
-                           self.data.vertexes,
-                           self.data.bond_num_types,
-                           self.data.atom_num_types,
-                           self.dropout)
-        
-        if self.use_quantum_disc:
-            self.D = KaoQuantumDisc()
-            self.n_critic = 10          # override: 10 D steps per G step
-            self.g_lr = 1e-4            # override: slower generator
-            self.d_optimizer = torch.optim.Adam(self.D.parameters(), lr=1e-4, betas=(0.5, 0.9))
-            print("Using KaoQuantumDisc (9-qubit, Kao et al. 2023)", flush=True)
+        cfg = self.config
+        self.latent = make_latent(cfg.latent, dim=cfg.z_dim, qubits=cfg.qubits,
+                                  layers=cfg.layer, seed=cfg.seed, n_freq=cfg.n_freq)
+        print(f'Latent source: {json.dumps(self.latent.describe())}', flush=True)
+
+        # The latent source's parameters (if any) get their own learning rate:
+        # a VQC needs a much larger step than the generator's dense stack.
+        latent_params = [p for p in self.latent.parameters() if p.requires_grad]
+        if latent_params and cfg.update_latent:
+            lr = cfg.qc_lr if cfg.qc_lr else self.g_lr
+            self.g_optimizer = torch.optim.RMSprop(
+                [{'params': list(self.G.parameters())},
+                 {'params': latent_params, 'lr': lr}], lr=self.g_lr)
         else:
-            self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
-            self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
-        self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim - 1, self.dropout)
+            for p in latent_params:
+                p.requires_grad_(False)
+            self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), self.g_lr)
 
-        # Optimizers can be RMSprop or Adam
-        # (g_lr is already overridden to 1e-4 above if quantum)
-        self.g_optimizer = torch.optim.RMSprop(self.G.parameters(), self.g_lr)
+        self.d_optimizer = torch.optim.RMSprop(self.D.parameters(), self.d_lr)
         self.v_optimizer = torch.optim.RMSprop(self.V.parameters(), self.g_lr)
 
-        # Print the networks
-        self.print_network(self.G, 'G', self.log)
-        self.print_network(self.D, 'D', self.log)
-        self.print_network(self.V, 'V', self.log)
+        for model, name in ((self.G, 'G'), (self.D, 'D'), (self.V, 'V')):
+            n = sum(p.numel() for p in model.parameters())
+            print(f'{name}: {n} parameters')
+            if self.log is not None:
+                self.log.info(f'{name}: {n} parameters')
 
-        # Bring the network to GPU
-        self.G.to(self.device)
-        self.D.to(self.device)
-        self.V.to(self.device)
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
+
+    def save_checkpoints(self, epoch):
+        """Save G/D/V and the latent state for ``epoch`` (1-based)."""
+        torch.save(self.G.state_dict(), os.path.join(self.model_dir_path, f'{epoch}-G.ckpt'))
+        torch.save(self.D.state_dict(), os.path.join(self.model_dir_path, f'{epoch}-D.ckpt'))
+        torch.save(self.V.state_dict(), os.path.join(self.model_dir_path, f'{epoch}-V.ckpt'))
+        torch.save(self.latent.state_dict(), os.path.join(self.model_dir_path, f'{epoch}-Z.ckpt'))
+
+    def restore(self, epoch):
+        for net, tag in ((self.G, 'G'), (self.D, 'D'), (self.V, 'V')):
+            path = os.path.join(self.model_dir_path, f'{epoch}-{tag}.ckpt')
+            net.load_state_dict(torch.load(path, map_location=self.device))
+        gen_utils.load_latent_state(self.latent, self.model_dir_path, epoch)
+        print(f'Restored epoch {epoch} from {self.model_dir_path}')
+
+    # ------------------------------------------------------------------
+    # Pieces of the objective
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def print_network(model, name, log=None):
-        """Print out the network information"""
-        num_params = 0
-        for p in model.parameters():
-            num_params += p.numel()
-        print(model)
-        print(name)
-        print("The number of parameters: {}".format(num_params))
-        if log is not None:
-            log.info(model)
-            log.info(name)
-            log.info("The number of parameters: {}".format(num_params))
+    def postprocess(inputs, method, temperature=1.0):
+        def listify(x):
+            return x if isinstance(x, (list, tuple)) else [x]
 
-    def restore_model(self, resume_iters, load_g_only=False):
-        """Restore trained networks from checkpoints."""
-        ckpt_dir = self.model_dir_path
-        print('Loading checkpoints from {} at step {}...'.format(ckpt_dir, resume_iters))
-        G_path = os.path.join(ckpt_dir, f'{resume_iters}-G.ckpt')
-        self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
-
-        if load_g_only:
-            return
-
-        D_path = os.path.join(ckpt_dir, f'{resume_iters}-D.ckpt')
-        V_path = os.path.join(ckpt_dir, f'{resume_iters}-V.ckpt')
-        self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
-        self.V.load_state_dict(torch.load(V_path, map_location=lambda storage, loc: storage))
-
-    def load_gen_weights(self, resume_iters):
-        """Restore the trained quantum circuit"""
-        weights_pth = os.path.join(self.model_dir_path, 'molgan_red_weights.csv')
-        weights = pd.read_csv(weights_pth, header=None).iloc[resume_iters-1, 1:].values
-        self.gen_weights = torch.tensor(list(weights), requires_grad=True)
-
-    def update_lr(self, gamma):
-        """Decay learning rates of the generator and discriminator."""
-        for param_group in self.d_optimizer.param_groups:
-            param_group['lr'] *= gamma
-        for param_group in self.g_optimizer.param_groups:
-            param_group['lr'] *= gamma
-
-    def reset_grad(self):
-        """Reset the gradient buffers"""
-        self.g_optimizer.zero_grad()
-        self.d_optimizer.zero_grad()
-        self.v_optimizer.zero_grad()
-
-    def gradient_penalty(self, y, x):
-        """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
-        weight = torch.ones(y.size()).to(self.device)
-        dydx = torch.autograd.grad(outputs=y, inputs=x,
-                                   grad_outputs=weight,
-                                   retain_graph=True,
-                                   create_graph=True,
-                                   only_inputs=True)[0]
-        dydx = dydx.view(dydx.size(0), -1)
-        dydx_l2norm = torch.sqrt(torch.sum(dydx ** 2, dim=1))
-        return torch.mean((dydx_l2norm - 1) ** 2)
+        if method == 'soft_gumbel':
+            out = [F.gumbel_softmax(e.contiguous().view(-1, e.size(-1)) / temperature,
+                                    hard=False).view(e.size()) for e in listify(inputs)]
+        elif method == 'hard_gumbel':
+            out = [F.gumbel_softmax(e.contiguous().view(-1, e.size(-1)) / temperature,
+                                    hard=True).view(e.size()) for e in listify(inputs)]
+        else:
+            out = [F.softmax(e / temperature, -1) for e in listify(inputs)]
+        return out if len(out) > 1 else out[0]
 
     def label2onehot(self, labels, dim):
-        """Convert label indices to one-hot vectors"""
         out = torch.zeros(list(labels.size()) + [dim]).to(self.device)
         out.scatter_(len(out.size()) - 1, labels.unsqueeze(-1), 1.)
         return out
 
-    def sample_z(self, batch_size):
-        """Sample the random noise"""
-        return np.random.normal(0, 1, size=(batch_size, self.z_dim))
-
-    def list_checkpoints(self):
-        """List all available checkpoints in the model directory"""
-        checkpoints = sorted([f for f in os.listdir(self.model_dir_path) if f.endswith(".ckpt")])
-        if not checkpoints:
-            print("No checkpoints found in:", self.model_dir_path)
-        else:
-            print("\nAvailable Checkpoints:")
-            for ckpt in checkpoints:
-                print(ckpt)
-        # This function loads a checkpoint and prints model parameters. 
-    def analyze_checkpoint(self, epoch):
-        """Load and analyze a specific checkpoint"""
-        # checkpoint_path = os.path.join(self.model_dir_path, f"model_epoch_{epoch}.ckpt")
-        # Search for the correct checkpoint file (e.g., 98-G.ckpt, 99-D.ckpt)
-
-        checkpoint_files = [f for f in os.listdir(self.model_dir_path) if f.startswith(f"{epoch}-") and f.endswith(".ckpt")]
-        if not checkpoint_files:
-            print(f"❌ No checkpoint found for epoch {epoch} in {self.model_dir_path}")
-            return  # Exit function before using 'checkpoint'
-            checkpoint_path = os.path.join(self.model_dir_path, checkpoint_files[0])
-            print(f"✅ Loading checkpoint: {checkpoint_path}")
-            try:
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            except Exception as e:
-                    print(f"❌ Failed to load checkpoint {checkpoint_path}: {e}")
-                    return  # Exit function if loading fails
-                    if "model_state_dict" in checkpoint:
-                        self.G.load_state_dict(checkpoint["model_state_dict"])
-                        print("\nModel parameters loaded successfully!")
-
-        # Print first layer weights
-        for name, param in self.G.named_parameters():
-            print(name, param.shape)
-            break
-        else:
-            print("No 'model_state_dict' found in checkpoint.")
-        #  # Load optimizer state if needed
-        # if "optimizer_state_dict" in checkpoint:
-        #     print("Optimizer state is stored in the checkpoint.")
-
-    
-    # This function loads a trained model and generates a molecule.
-    def generate_molecule(self, epoch):
-        """Load a checkpoint and generate a molecule"""
-        checkpoint_files = [f for f in os.listdir(self.model_dir_path) if f.startswith(f"{epoch}-") and f.endswith(".ckpt")]
-        if not checkpoint_files:
-            print(f"❌ No checkpoint found for epoch {epoch} in {self.model_dir_path}")
-            return  # Exit function before using 'checkpoint'
-            checkpoint_path = os.path.join(self.model_dir_path, checkpoint_files[0])
-            print(f"✅ Using checkpoint for molecule generation: {checkpoint_path}")
-            try:
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            except Exception as e:
-                print(f"❌ Failed to load checkpoint {checkpoint_path}: {e}")
-                return  # Exit function if loading fails
-                self.G.load_state_dict(checkpoint["model_state_dict"])
-
-        # Generate a molecule (assuming your Generator has a generate() method)
-        if hasattr(self.G, "generate"):
-            generated_molecule = self.G.generate()
-            print(f"\n🧪 Generated Molecule from Epoch {epoch}:")
-            print(generated_molecule)
-        else:
-            print("\n❌ The Generator class does not have a 'generate' method. Please implement it.")
-
-
-
-
-    @staticmethod
-    def postprocess(inputs, method, temperature=1.0):
-        """Convert the probability matrices into label matrices"""
-        def listify(x):
-            return x if type(x) == list or type(x) == tuple else [x]
-
-        def delistify(x):
-            return x if len(x) > 1 else x[0]
-        if method == 'soft_gumbel':
-            softmax = [F.gumbel_softmax(e_logits.contiguous().view(-1, e_logits.size(-1))/temperature, hard=False).view(e_logits.size()) for e_logits in listify(inputs)]
-        elif method == 'hard_gumbel':
-            softmax = [F.gumbel_softmax(e_logits.contiguous().view(-1, e_logits.size(-1))/temperature, hard=True).view(e_logits.size()) for e_logits in listify(inputs)]
-        else:
-            softmax = [F.softmax(e_logits/temperature, -1) for e_logits in listify(inputs)]
-
-        return [delistify(e) for e in (softmax)]
+    def gradient_penalty(self, y, x):
+        weight = torch.ones(y.size()).to(self.device)
+        dydx = torch.autograd.grad(outputs=y, inputs=x, grad_outputs=weight,
+                                   retain_graph=True, create_graph=True,
+                                   only_inputs=True)[0]
+        dydx = dydx.view(dydx.size(0), -1)
+        return torch.mean((torch.sqrt(torch.sum(dydx ** 2, dim=1)) - 1) ** 2)
 
     def reward(self, mols):
-        """Calculate the rewards of mols"""
+        """RL reward. Weighted mode uses normalised SA/logP by design; those
+        normalised values are never reported as metrics."""
         if self.reward_mode == 'weighted':
-            qed = MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=False)
-            sa = MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
-            logp = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
-            novelty = MolecularMetrics.novel_scores(mols, self.data).astype(np.float32)
-            unique = MolecularMetrics.unique_scores(mols).astype(np.float32)
-            clean_valid = MolecularMetrics.valid_scores(mols).astype(np.float32)
-
-            weighted_sum = (
-                self.rw_qed * qed +
-                self.rw_sa * sa +
-                self.rw_logp * logp +
-                self.rw_unique * unique +
-                self.rw_novelty * novelty +
-                self.rw_clean_valid * clean_valid
-            )
-            weight_total = (
-                self.rw_qed +
-                self.rw_sa +
-                self.rw_logp +
-                self.rw_unique +
-                self.rw_novelty +
-                self.rw_clean_valid
-            )
-            if weight_total > 0:
-                weighted_sum = weighted_sum / weight_total
-
-            fragment_penalty = 1.0 - clean_valid
-            rr = weighted_sum - self.rw_fragment_penalty * fragment_penalty
-            rr = np.clip(rr, self.rw_clip_min, self.rw_clip_max)
-            return rr.reshape(-1, 1)
-
+            return reward_utils.weighted_reward(mols, self.train_smiles,
+                                                self.reward_weights, clip=self.rw_clip)
         rr = 1.
         for m in ('logp,sas,qed,unique' if self.metric == 'all' else self.metric).split(','):
-            if m == 'np':
-                rr *= MolecularMetrics.natural_product_scores(mols, norm=True)
-            elif m == 'logp':
-                rr *= MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
+            if m == 'logp':
+                rr = rr * MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
             elif m == 'sas':
-                rr *= MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
+                rr = rr * MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
             elif m == 'qed':
-                rr *= MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=True)
+                rr = rr * MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=True)
             elif m == 'novelty':
-                rr *= MolecularMetrics.novel_scores(mols, self.data)
-            elif m == 'dc':
-                rr *= MolecularMetrics.drugcandidate_scores(mols, self.data)
+                rr = rr * MolecularMetrics.novel_scores(mols, self.data)
             elif m == 'unique':
-                rr *= MolecularMetrics.unique_scores(mols)
-            elif m == 'diversity':
-                rr *= MolecularMetrics.diversity_scores(mols, self.data)
+                rr = rr * MolecularMetrics.unique_scores(mols)
             elif m == 'validity':
-                rr *= MolecularMetrics.valid_scores(mols)
+                rr = rr * MolecularMetrics.valid_scores(mols)
+            elif m == 'diversity':
+                rr = rr * MolecularMetrics.diversity_scores(mols, self.data)
             else:
-                raise RuntimeError('{} is not defined as a metric'.format(m))
-        return rr.reshape(-1, 1)
+                raise RuntimeError(f'{m} is not a known reward metric')
+        return np.asarray(rr, dtype=np.float32).reshape(-1, 1)
+
+    def decode(self, nodes_hat, edges_hat):
+        edges_hard = torch.max(edges_hat, -1)[1].detach().cpu().numpy()
+        nodes_hard = torch.max(nodes_hat, -1)[1].detach().cpu().numpy()
+        return chem.decode_batch(nodes_hard, edges_hard, self.data)
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
+    def temperature(self, epoch):
+        span = max(1, self.num_epochs - 1)
+        return self.gumbel_temp_start + (self.gumbel_temp_end - self.gumbel_temp_start) * (epoch / span)
 
     def train_and_validate(self):
-        """Train and validate function"""
         self.start_time = time.time()
-
-        # start training from scratch or resume training
         start_epoch = 0
-        if self.g_resume_epoch is not None:
-            # Warm-start generator only (e.g., from classical run)
-            if self.g_ckpt_dir is not None:
-                self.model_dir_path, orig_model_dir = self.g_ckpt_dir, self.model_dir_path
-            else:
-                orig_model_dir = None
-            self.restore_model(self.g_resume_epoch, load_g_only=True)
-            if orig_model_dir:
-                self.model_dir_path = orig_model_dir
         if self.resume_epoch is not None and self.mode == 'train':
             start_epoch = self.resume_epoch
-            self.restore_model(self.resume_epoch)
-            if self.quantum:
-                self.load_gen_weights(self.resume_epoch)
-        # restore models for test
-        elif self.test_epoch is not None and self.mode == 'test':
-            self.restore_model(self.test_epoch)
-            if self.quantum:
-                self.load_gen_weights(self.test_epoch)
-        else:
-            print('Training From Scratch...')
+            self.restore(self.resume_epoch)
+        elif self.config.test_epoch is not None and self.mode == 'test':
+            self.restore(self.config.test_epoch)
 
-        # start training loop or test phase
-        if self.mode == 'train':
-            print('Start training...')
-            for i in range(start_epoch, self.num_epochs):
-                self.train_or_valid(epoch_i=i, train_val_test='train')
-                self.train_or_valid(epoch_i=i, train_val_test='val')
-        elif self.mode == 'test':
-            print('Start testing...')
-            assert (self.resume_epoch is not None or self.test_epoch is not None)
-            self.train_or_valid(epoch_i=start_epoch, train_val_test='val')
-        else:
-            raise NotImplementedError
+        if self.mode == 'test':
+            metrics = self.validate(self.config.test_epoch or start_epoch)
+            print(json.dumps(metrics, indent=2))
+            return
 
-    def get_gen_mols(self, n_hat, e_hat, method):
-        """Convert edges and nodes matrices into molecules"""
-        (edges_hard, nodes_hard) = self.postprocess((e_hat, n_hat), method)
-        edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
-        mols = [self.data.matrices2mol(n_.data.cpu().numpy(), e_.data.cpu().numpy(), strict=True) for e_, n_ in zip(edges_hard, nodes_hard)]
-        return mols
+        self._init_history()
+        for epoch in range(start_epoch, self.num_epochs):
+            losses = self.train_one_epoch(epoch)
+            if (epoch + 1) % self.model_save_step == 0:
+                self.save_checkpoints(epoch + 1)
+            if (epoch + 1) % self.val_every == 0 or epoch + 1 == self.num_epochs:
+                metrics = self.validate(epoch + 1)
+                self._append_history(epoch + 1, losses, metrics)
+                self._report(epoch, losses, metrics)
 
-    def get_reward(self, n_hat, e_hat, method):
-        """Get the reward from edges and nodes matrices"""
-        (edges_hard, nodes_hard) = self.postprocess((e_hat, n_hat), method)
-        edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
-        mols = [self.data.matrices2mol(n_.data.cpu().numpy(), e_.data.cpu().numpy(), strict=True) for e_, n_ in zip(edges_hard, nodes_hard)]
-        reward = torch.from_numpy(self.reward(mols)).to(self.device)
-        return reward
-
-    def save_checkpoints(self, epoch_i):
-        """store the models and quantum circuit"""
-        G_path = os.path.join(self.model_dir_path, '{}-G.ckpt'.format(epoch_i + 1))
-        D_path = os.path.join(self.model_dir_path, '{}-D.ckpt'.format(epoch_i + 1))
-        V_path = os.path.join(self.model_dir_path, '{}-V.ckpt'.format(epoch_i + 1))
-        torch.save(self.G.state_dict(), G_path)
-        torch.save(self.D.state_dict(), D_path)
-        torch.save(self.V.state_dict(), V_path)
-        # save quantum weights
-        if self.quantum:
-            with open(os.path.join(self.model_dir_path, 'molgan_red_weights.csv'), 'a') as file:
-                writer = csv.writer(file)
-                writer.writerow([str(epoch_i)]+list(self.gen_weights.detach().numpy()))
-        print('Saved model checkpoints into {}...'.format(self.model_dir_path))
-        if self.log is not None:
-            self.log.info('Saved model checkpoints into {}...'.format(self.model_dir_path))
-
-    def train_or_valid(self, epoch_i, train_val_test='val'):
-        """Train or valid function"""
-        # The first several epochs using RL to purse stability (not used)
-        if epoch_i < 0:
-            cur_la = 0
-        else:
-            cur_la = self.la
-
-        # Recordings
+    def train_one_epoch(self, epoch):
+        temp = self.temperature(epoch)
         losses = defaultdict(list)
-        scores = defaultdict(list)
 
-        # Iterations
-        the_step = self.num_steps
-        if train_val_test == 'val':
-            if self.mode == 'train':
-                the_step = 1
-                print('[Validating]')
-            elif self.mode == 'test':
-                the_step = 1
-                print('[Testing]')
-            else:
-                raise NotImplementedError
-
-        # Linear temperature schedule for Gumbel/softmax
-        temp_start = getattr(self, 'gumbel_temp_start', 1.0)
-        temp_end = getattr(self, 'gumbel_temp_end', 1.0)
-        temp = temp_start + (temp_end - temp_start) * (epoch_i / max(1, self.num_epochs - 1))
-
-        for a_step in range(the_step):
-
-            # non-Quantum part
-            if train_val_test == 'val' and not self.quantum:
-                if self.test_sample_size is None:
-                    mols, _, _, a, x, _, _, _, _ = self.data.next_validation_batch()
-                    z = self.sample_z(a.shape[0])
-                else:
-                    mols, _, _, a, x, _, _, _, _ = self.data.next_validation_batch(self.test_sample_size)
-                    z = self.sample_z(self.test_sample_size)
-            elif train_val_test == 'train' and not self.quantum:
-                mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
-                z = self.sample_z(self.batch_size)
-
-            # Quantum part
-            elif train_val_test == 'val' and self.quantum:
-                if self.test_sample_size is None:
-                    mols, _, _, a, x, _, _, _, _ = self.data.next_validation_batch()
-                    sample_list = [self.gen_circuit(self.gen_weights) for i in range(a.shape[0])]
-                else:
-                    mols, _, _, a, x, _, _, _, _ = self.data.next_validation_batch(self.test_sample_size)
-                    sample_list = [self.gen_circuit(self.gen_weights) for i in range(self.test_sample_size)]
-            elif train_val_test == 'train' and self.quantum:
-                mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
-                sample_list = [self.gen_circuit(self.gen_weights) for i in range(self.batch_size)]
-
-            # Error
-            else:
-                raise NotImplementedError
-
-            ########## Preprocess input data ##########
-            a = torch.from_numpy(a).to(self.device).long() # adjacency
-            x = torch.from_numpy(x).to(self.device).long() # node
+        for a_step in range(self.num_steps):
+            cur_step = self.num_steps * epoch + a_step
+            real_mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
+            a = torch.from_numpy(a).to(self.device).long()
+            x = torch.from_numpy(x).to(self.device).long()
             a_tensor = self.label2onehot(a, self.b_dim)
             x_tensor = self.label2onehot(x, self.m_dim)
-            
-            ax_tensor = upper(a_tensor, x_tensor)
+            z = self.latent.sample(a.size(0), device=self.device).float()
 
-            if self.quantum:
-                z = torch.stack(tuple(sample_list)).to(self.device).float()
-            else:
-                z = torch.from_numpy(z).to(self.device).float()
-
-            # tensorboard
-            loss_tb = {}
-
-            # current steps
-            cur_step = self.num_steps * epoch_i + a_step
-
-            ########## Train the discriminator ##########
-
-            if self.use_quantum_disc:
-                # Upper-triangular bonds + atoms -> (batch, 45, 5) -> 225-dim in disc
-                idx = torch.triu_indices(9, 9, offset=1)
-                real_bonds = a_tensor[:, idx[0], idx[1], :]  # (batch, 36, 5)
-                real_upper = torch.cat([real_bonds, x_tensor[:, :, :5]], dim=1).float()  # (batch, 45, 5)
-                edges_logits, nodes_logits = self.G(z)
-                (edges_hat, nodes_hat) = self.postprocess(
-                    (edges_logits, nodes_logits), self.post_method, temperature=temp)
-                fake_bonds = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
-                fake_upper = torch.cat([fake_bonds, nodes_hat[:, :, :5]], dim=1).float()  # (batch, 45, 5)
-                logits_real = self.D(real_upper)   # (batch, 1)
-                logits_fake = self.D(fake_upper)   # (batch, 1)
-                features_real = logits_real
-                features_fake = logits_fake
-                d_loss_real = torch.mean(logits_real)
-                d_loss_fake = torch.mean(logits_fake)
-                grad_penalty = torch.tensor(0.0).to(self.device)
-                loss_D = -d_loss_real + d_loss_fake
-            else:
-                logits_real, features_real = self.D(a_tensor, None, x_tensor)
-                edges_logits, nodes_logits = self.G(z)
-                (edges_hat, nodes_hat) = self.postprocess(
-                    (edges_logits, nodes_logits), self.post_method, temperature=temp)
-                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
-                eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
-                x_int0 = (eps * a_tensor +
-                          (1. - eps) * edges_hat).requires_grad_(True)
-                x_int1 = (eps.squeeze(-1) * x_tensor +
-                          (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
-                grad0, grad1 = self.D(x_int0, None, x_int1)
-                grad_penalty = (self.gradient_penalty(grad0, x_int0) +
-                                self.gradient_penalty(grad0, x_int1))
-                d_loss_real = torch.mean(logits_real)
-                d_loss_fake = torch.mean(logits_fake)
-                loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
-            
-
-            if cur_la > 0:
-                losses['D/loss_real'].append(d_loss_real.item())
-                losses['D/loss_fake'].append(d_loss_fake.item())
-                losses['D/loss_gp'].append(grad_penalty.item())
-                losses['D/loss'].append(loss_D.item())
-
-                # tensorboard
-                loss_tb['D/loss_real'] = d_loss_real.item()
-                loss_tb['D/loss_fake'] = d_loss_fake.item()
-                loss_tb['D/loss_gp'] = grad_penalty.item()
-                loss_tb['D/loss'] = loss_D.item()
-
-            # Optimise discriminator
-            if train_val_test == 'train':
-                if self.critic_type == 'D':
-                    # training D for n_critic-1 times followed by G one time
-                    if (cur_step == 0) or (cur_step % self.n_critic != 0):
-                        self.reset_grad()
-                        loss_D.backward()
-                        self.d_optimizer.step()
-                        if self.use_quantum_disc:
-                            for p in self.D.parameters():
-                                p.data.clamp_(-0.5, 0.5)
-                else:
-                    # training G for n_critic-1 times followed by D one time
-                    if (cur_step != 0) and (cur_step % self.n_critic == 0):
-                        self.reset_grad()
-                        loss_D.backward()
-                        self.d_optimizer.step()
-                        if self.use_quantum_disc:
-                            for p in self.D.parameters():
-                                p.data.clamp_(-0.5, 0.5)
-
-            ########## Train the generator ##########
-
-            # Z-to-target
+            # ---- Discriminator (WGAN-GP) --------------------------------
+            logits_real, _ = self.D(a_tensor, None, x_tensor)
             edges_logits, nodes_logits = self.G(z)
-            # Postprocess with Gumbel softmax
-            (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method, temperature=temp)
-            
-            if self.use_quantum_disc:
-                idx = torch.triu_indices(9, 9, offset=1)
-                fake_bonds_gen = edges_hat[:, idx[0], idx[1], :]  # (batch, 36, 5)
-                fake_upper_gen = torch.cat([fake_bonds_gen, nodes_hat[:, :, :5]], dim=1).float()
-                logits_fake = self.D(fake_upper_gen)  # (batch, 1)
-                features_fake = logits_fake
+            edges_hat, nodes_hat = self.postprocess((edges_logits, nodes_logits),
+                                                    self.post_method, temp)
+            logits_fake, _ = self.D(edges_hat, None, nodes_hat)
+
+            eps = torch.rand(logits_real.size(0), 1, 1, 1).to(self.device)
+            x_int0 = (eps * a_tensor + (1. - eps) * edges_hat).requires_grad_(True)
+            x_int1 = (eps.squeeze(-1) * x_tensor
+                      + (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
+            grad_logits, _ = self.D(x_int0, None, x_int1)
+            grad_penalty = (self.gradient_penalty(grad_logits, x_int0)
+                            + self.gradient_penalty(grad_logits, x_int1))
+
+            d_loss_real = torch.mean(logits_real)
+            d_loss_fake = torch.mean(logits_fake)
+            # E[D(fake)] - E[D(real)] + lambda * GP. The sign of the first two
+            # terms is the Wasserstein estimate; summing them (as some earlier
+            # implementations do) cancels the critic's gradient signal.
+            loss_D = -d_loss_real + d_loss_fake + self.la_gp * grad_penalty
+
+            train_d = ((cur_step == 0 or cur_step % self.n_critic != 0)
+                       if self.critic_type == 'D'
+                       else (cur_step != 0 and cur_step % self.n_critic == 0))
+            if train_d:
+                self.zero_grad()
+                loss_D.backward()
+                self.d_optimizer.step()
+
+            # ---- Generator + value net ----------------------------------
+            edges_logits, nodes_logits = self.G(z)
+            edges_hat, nodes_hat = self.postprocess((edges_logits, nodes_logits),
+                                                    self.post_method, temp)
+            logits_fake, _ = self.D(edges_hat, None, nodes_hat)
+            value_real, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
+            value_fake, _ = self.V(edges_hat, None, nodes_hat, torch.sigmoid)
+
+            loss_G = torch.mean(-logits_fake)
+            loss_RL = torch.mean(-value_fake)
+            if self.la < 1.0:
+                # Value net regresses the reward of the generated molecules and
+                # of the real molecules in THIS batch (real_mols), so the two
+                # regression targets come from the same draw as the graphs the
+                # critic just saw.
+                reward_f = torch.from_numpy(
+                    self.reward(self.decode(nodes_hat, edges_hat))).to(self.device)
+                reward_r = torch.from_numpy(
+                    self.reward(list(real_mols))).to(self.device)
+                loss_V = torch.mean(torch.abs(value_real - reward_r)
+                                    + torch.abs(value_fake - reward_f))
             else:
-                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
+                loss_V = torch.tensor(0.0, device=self.device)
 
-            # Value losses (RL)
-            value_logit_real, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
-            value_logit_fake, _ = self.V(edges_hat, None, nodes_hat, torch.sigmoid)
+            train_g = ((cur_step != 0 and cur_step % self.n_critic == 0)
+                       if self.critic_type == 'D'
+                       else (cur_step == 0 or cur_step % self.n_critic != 0))
+            if train_g:
+                self.zero_grad()
+                if self.la < 1.0 and self.enable_rl_loss:
+                    alpha = torch.abs(loss_G.detach() / (loss_RL.detach() + 1e-8)).detach()
+                    step_G = self.la * loss_G + (1.0 - self.la) * alpha * loss_RL
+                    step_G.backward(retain_graph=True)
+                    loss_V.backward()
+                    self.g_optimizer.step()
+                    self.v_optimizer.step()
+                else:
+                    (self.la * loss_G).backward()
+                    self.g_optimizer.step()
 
-            # Feature mapping losses. Not used anywhere in the PyTorch version.
-            # I include it here for the consistency with the TF code.
-            #f_loss = (torch.mean(features_real, 0) - torch.mean(features_fake, 0)) ** 2
-
-            # Real Reward
-            reward_r = torch.from_numpy(self.reward(mols)).to(self.device)
-            # Fake Reward
-            reward_f = self.get_reward(nodes_hat, edges_hat, self.post_method)
-
-            # Losses Update
-            loss_G = -logits_fake
-            # Original TF loss_V. Here we use absolute values instead of the squared one.
-            # loss_V = (value_logit_real - reward_r) ** 2 + (value_logit_fake - reward_f) ** 2
-            loss_V = torch.abs(value_logit_real - reward_r) + torch.abs(value_logit_fake - reward_f)
-            loss_RL = -value_logit_fake
-
-            loss_G = torch.mean(loss_G)
-            loss_V = torch.mean(loss_V)
-            loss_RL = torch.mean(loss_RL)
+            losses['D/loss'].append(loss_D.item())
+            losses['D/real'].append(d_loss_real.item())
+            losses['D/fake'].append(d_loss_fake.item())
+            losses['D/gp'].append(grad_penalty.item())
             losses['G/loss'].append(loss_G.item())
             losses['RL/loss'].append(loss_RL.item())
-            losses['V/loss'].append(loss_V.item())
+            losses['V/loss'].append(float(loss_V.item()))
 
-            # tensorboard
-            loss_tb['G/loss'] = loss_G.item()
-            loss_tb['RL/loss'] = loss_RL.item()
-            loss_tb['V/loss'] = loss_V.item()
+            if self.logger is not None:
+                for tag, val in (('D/loss', loss_D.item()), ('G/loss', loss_G.item())):
+                    self.logger.scalar_summary(tag, val, cur_step)
 
-            print('d_loss {:.2f} d_fake {:.2f} d_real {:.2f} g_loss: {:.2f}'.format(loss_D.item(), d_loss_fake.item(), d_loss_real.item(), loss_G.item()))
-            print('======================= {} =============================='.format(datetime.datetime.now()), flush = True)
-            if self.enable_rl_loss:
-                alpha = torch.abs(loss_G.detach() / (loss_RL.detach() + 1e-8)).detach()
-                train_step_G = cur_la * loss_G + (1.0 - cur_la) * alpha * loss_RL
-            else:
-                train_step_G = cur_la * loss_G
+        if self.decay_every_epoch and epoch != 0 and (epoch + 1) % self.decay_every_epoch == 0:
+            self.update_lr(self.gamma)
 
-            train_step_V = loss_V
+        return {k: float(np.mean(v)) for k, v in losses.items()}
 
-            # Optimise generator and reward network
-            if train_val_test == 'train':
-                if self.critic_type == 'D':
-                    # training D for n_critic-1 times followed by G one time
-                    if (cur_step != 0) and (cur_step % self.n_critic) == 0:
-                        self.reset_grad()
-                        if cur_la < 1.0:
-                            train_step_G.backward(retain_graph=True)
-                            train_step_V.backward()
-                            self.g_optimizer.step()
-                            self.v_optimizer.step()
-                        else:
-                            train_step_G.backward(retain_graph=True)
-                            self.g_optimizer.step()
-                else:
-                    # training G for n_critic-1 times followed by D one time
-                    if (cur_step == 0) or (cur_step % self.n_critic != 0):
-                        self.reset_grad()
-                        if cur_la < 1.0:
-                            train_step_G.backward(retain_graph=True)
-                            train_step_V.backward()
-                            self.g_optimizer.step()
-                            self.v_optimizer.step()
-                        else:
-                            train_step_G.backward(retain_graph=True)
-                            self.g_optimizer.step()
+    def zero_grad(self):
+        self.g_optimizer.zero_grad()
+        self.d_optimizer.zero_grad()
+        self.v_optimizer.zero_grad()
 
+    def update_lr(self, gamma):
+        for opt in (self.d_optimizer, self.g_optimizer, self.v_optimizer):
+            for group in opt.param_groups:
+                group['lr'] *= gamma
 
-            if train_val_test == 'train' and self.use_tensorboard:
-                for tag, value in loss_tb.items():
-                    self.logger.scalar_summary(tag, value, cur_step)
+    # ------------------------------------------------------------------
+    # Honest validation
+    # ------------------------------------------------------------------
 
+    def validate(self, epoch):
+        """Generate a fixed, seeded sample of `val_n` molecules and score them
+        with the same metric code the offline evaluation uses.
 
-            ########## Frechet distribution ##########
-            (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel', temperature=temp)
-            edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
-            R = [list(a[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
-            F = [list(edges_hard[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
-            #F =  F.cpu()
-            fd_bond = frdist(R, F)
+        The noise seed is constant across epochs so the per-epoch curve is not
+        contaminated by noise-draw variance, and it is offset far from the
+        protocol's selection/report streams so that in-training monitoring can
+        never be mistaken for, or leak into, a reported number.
+        """
+        self.G.eval()
+        mols = gen_utils.sample_molecules(
+            self.G, self.latent, self.data, self.val_n,
+            batch_size=min(256, self.val_n), seed=self.val_seed,
+            post_method=self.post_method, device=self.device)
+        self.G.train()
 
-            R=[list(x[i].to('cpu')) + list(a[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
-            F=[list(nodes_hard[i].to('cpu')) + list(edges_hard[i].reshape(-1).to('cpu'))  for i in range(self.batch_size)]
-            fd_bond_atom = frdist(R, F)
+        smi = [chem.canonical_smiles(m) for m in mols]
+        valid = [s for m, s in zip(mols, smi) if chem.is_valid(m) and s]
+        clean = [s for m, s in zip(mols, smi) if chem.is_clean_valid(m) and s]
+        clean_mols = [m for m in mols if chem.is_clean_valid(m)]
+        props = chem.raw_properties(clean_mols)
+        n = len(mols)
 
-            loss_tb['FD/bond'] = fd_bond
-            loss_tb['FD/bond_atom'] = fd_bond_atom
+        def frac(sub, denom):
+            return len(sub) / denom if denom else float('nan')
 
-            losses['FD/bond'].append(fd_bond)
-            losses['FD/bond_atom'].append(fd_bond_atom)
+        metrics = {
+            'n_sampled': n,
+            'validity': frac(valid, n),
+            'clean_validity': frac(clean, n),
+            'uniqueness': frac(set(valid), len(valid)) if valid else float('nan'),
+            'uniqueness_clean': frac(set(clean), len(clean)) if clean else float('nan'),
+            'novelty': (sum(s not in self.train_smiles for s in valid) / len(valid)
+                        if valid else float('nan')),
+            'novelty_clean': (sum(s not in self.train_smiles for s in clean) / len(clean)
+                              if clean else float('nan')),
+        }
+        for key in chem.PROPERTY_KEYS:
+            vals = props[key]
+            metrics[key] = float(np.nanmean(vals)) if np.any(np.isfinite(vals)) else float('nan')
 
+        if self.img_dir_path and clean_mols:
+            save_mol_img(clean_mols[:8], os.path.join(self.img_dir_path, f'mol-{epoch}.png'))
+        return metrics
 
-            if train_val_test == 'train' and self.use_tensorboard:
-                for tag, value in loss_tb.items():
-                    self.logger.scalar_summary(tag, value, cur_step)
+    # ------------------------------------------------------------------
+    # History / logging
+    # ------------------------------------------------------------------
 
-            ########## Miscellaneous ##########
+    HISTORY_FIELDS = ('epoch', 'n_sampled', 'validity', 'clean_validity', 'uniqueness',
+                      'uniqueness_clean', 'novelty', 'novelty_clean',
+                      'QED', 'logP', 'SA', 'MW',
+                      'D/loss', 'D/real', 'D/fake', 'D/gp', 'G/loss', 'RL/loss', 'V/loss')
 
-            # Decay learning rates
-            if epoch_i != 0 and self.decay_every_epoch:
-                if a_step == 0 and (epoch_i+1) % self.decay_every_epoch == 0:
-                    self.update_lr(self.gamma)
+    def _init_history(self):
+        if os.path.exists(self.history_path):
+            return
+        os.makedirs(os.path.dirname(self.history_path), exist_ok=True)
+        with open(self.history_path, 'w', newline='') as f:
+            csv.writer(f).writerow(self.HISTORY_FIELDS)
 
+    def _append_history(self, epoch, losses, metrics):
+        row = {'epoch': epoch, **metrics, **losses}
+        with open(self.history_path, 'a', newline='') as f:
+            csv.writer(f).writerow([row.get(k, '') for k in self.HISTORY_FIELDS])
 
-            # Get scores
-            # if train_val_test == 'val':
-            if a_step % 10 == 0:
-                mols = self.get_gen_mols(nodes_logits, edges_logits, self.post_method)
-                m0, m1 = all_scores(mols, self.data, norm=True)  # 'mols' is output of Fake Reward
-                for k, v in m1.items():
-                    scores[k].append(v)
-                for k, v in m0.items():
-                    scores[k].append(np.array(v)[np.nonzero(v)].mean())
-
-                # Save checkpoints
-                if self.mode == 'train':
-                    # Save once per epoch (at first validation step) instead of every 10 steps.
-                    if a_step == 0 and (epoch_i + 1) % self.model_save_step == 0:
-                        self.save_checkpoints(epoch_i=epoch_i)
-
-                # Saving molecule images
-                mol_f_name = os.path.join(self.img_dir_path, 'mol-{}.png'.format(epoch_i))
-                save_mol_img(mols, mol_f_name, is_test=self.mode == 'test')
-
-                # Print out training information
-                et = time.time() - self.start_time
-                et = str(datetime.timedelta(seconds=et))[:-7]
-                log = "Elapsed [{}], Iteration [{}/{}]:".format(et, epoch_i + 1, self.num_epochs)
-
-                is_first = True
-                for tag, value in losses.items():
-                    if is_first:
-                        log += "\n{}: {:.2f}".format(tag, np.mean(value))
-                        is_first = False
-                    else:
-                        log += ", {}: {:.2f}".format(tag, np.mean(value))
-                is_first = True
-                for tag, value in scores.items():
-                    if is_first:
-                        log += "\n{}: {:.2f}".format(tag, np.mean(value))
-                        is_first = False
-                    else:
-                        log += ", {}: {:.2f}".format(tag, np.mean(value))
-                print(log)
-
-
-                if self.log is not None:
-                    self.log.info(log)
+    def _report(self, epoch, losses, metrics):
+        et = str(datetime.timedelta(seconds=time.time() - self.start_time))[:-7]
+        head = (f'[{et}] epoch {epoch + 1}/{self.num_epochs}  '
+                f'(val n={metrics["n_sampled"]}, seed={self.val_seed})')
+        body = ('  ' + '  '.join(f'{k}={metrics[k]:.4f}' for k in
+                                 ('validity', 'clean_validity', 'uniqueness_clean',
+                                  'novelty_clean', 'QED', 'SA')
+                                 if np.isfinite(metrics.get(k, np.nan))))
+        loss_line = '  ' + '  '.join(f'{k}={v:.3f}' for k, v in losses.items())
+        print(head + '\n' + body + '\n' + loss_line, flush=True)
+        if self.log is not None:
+            self.log.info(head + body + loss_line)

@@ -1,26 +1,22 @@
+# Reference environment. Versions are pinned to what the reported results were
+# produced with; `conda env create -f environment.yml` reproduces it.
 name: molgan-pt
 channels:
   - conda-forge
-  - pytorch
-  - defaults
 dependencies:
   - python=3.9
-  - numpy
-  - pandas
-  - scikit-learn
-  - matplotlib
-  - rdkit
-  - pytorch
-  - torchvision
-  - torchaudio
+  - numpy=1.26.4
+  - scipy=1.13.1
+  - pandas=2.3.1
+  - matplotlib=3.9.4
+  - rdkit=2024.9.6
+  - pytorch=2.4.1
   - pip
-  - zstd
-  - x264
-  - pillow
-  - scipy
-  - freetype
-  - libpng
   - pip:
-      - pennylane
-      - pennylane-lightning
-      - pysmiles
+      - pennylane==0.38.0
+      - pennylane-lightning==0.38.0
+      - pytest>=7.0
+      # Optional: enables Frechet ChemNet Distance in evaluate_run.py --fcd.
+      # Downloads a pretrained ChemNet checkpoint on first use, so install it
+      # on a node with network access.
+      # - fcd_torch

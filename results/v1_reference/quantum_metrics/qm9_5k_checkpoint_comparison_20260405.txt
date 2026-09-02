@@ -1,0 +1,24 @@
+QM9 5k checkpoint comparison
+Date: 2026-04-05
+
+Matched setup:
+- Dataset: data/qm9_5k.sparsedataset
+- Architecture: z_dim=8, g_conv_dim=[128, 256, 512]
+- Samples per evaluation: 5000
+- Postprocess: softmax
+
+Quantum run
+- Run: results/quantum/QUANTUM_Fresh_0405_0231/20260405_023351/train
+- Epoch 1: validity=0.876, clean_valid=0.000, unique=0.002, novelty=0.876, QED=0.326, logP=0.310, SA=8.094, valid_smiles=4382, dot_count=4382, star_count=4382
+- Epoch 30: validity=0.000, clean_valid=0.000, unique=0.000, novelty=0.000, QED=0.000, logP=-3.000, SA=10.000, valid_smiles=0, dot_count=0, star_count=0
+
+Classical run
+- Run: results/classical/QDISC_Fixed_0405_0119/20260405_014747/train
+- Epoch 20: validity=0.898, clean_valid=0.114, unique=0.003, novelty=0.898, QED=0.417, logP=0.611, SA=3.989, valid_smiles=4489, dot_count=3919, star_count=0
+- Epoch 30: validity=0.686, clean_valid=0.258, unique=0.010, novelty=0.686, QED=0.384, logP=0.019, SA=5.752, valid_smiles=3430, dot_count=2140, star_count=619
+
+Interpretation
+- The quantum run is not uniformly zero: epoch 1 is usable, but it generates fragmented wildcard molecules, so clean validity remains 0.000.
+- The final quantum checkpoint is genuinely collapsed.
+- The matched classical run is stronger on clean validity and molecular quality, even when raw validity is similar.
+- Existing classical ablation files under results/classical/metrics are on GDB9, not QM9 5k, so they are not directly comparable to the quantum run above.

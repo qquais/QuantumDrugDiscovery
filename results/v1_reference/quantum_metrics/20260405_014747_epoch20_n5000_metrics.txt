@@ -1,0 +1,19 @@
+Run: results/classical/QDISC_Fixed_0405_0119/20260405_014747/train
+Checkpoint: results/classical/QDISC_Fixed_0405_0119/20260405_014747/train/model_dir/20-G.ckpt
+Dataset: data/qm9_5k.sparsedataset
+Samples: 5000
+Post method: softmax
+Generator dims: z_dim=8, g_conv_dim=[128, 256, 512]
+
+Validity fraction:   0.898
+Clean validity frac: 0.114
+Uniqueness fraction: 0.003
+Novelty fraction:    0.898
+
+Valid smiles count:  4489
+Contains "." count:  3919
+Contains "*" count:  0
+
+QED  : mean=0.417, std=0.156, min=0.000
+logP : mean=0.611, std=1.499, min=-3.000
+SA   : mean=3.989, std=2.100, min=2.051

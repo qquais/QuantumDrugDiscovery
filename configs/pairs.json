@@ -1,0 +1,77 @@
+[
+  [
+    "reward effect within quantum (ablation_b - none)",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc | reward=none | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "reward effect within classical (ablation_b - none)",
+    "latent=gaussian | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=gaussian | reward=none | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "quantum effect under reward shaping (vqc - gaussian)",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=gaussian | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "quantum effect without reward shaping (vqc - gaussian)",
+    "latent=vqc | reward=none | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=gaussian | reward=none | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "vqc vs bounded-uniform control",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=uniform | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "vqc vs rank-2 classical control",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=rank2 | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "vqc vs trigonometric surrogate",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=trig | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "entanglement on vs off (with reward)",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc_noent | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "entanglement on vs off (no reward)",
+    "latent=vqc | reward=none | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc_noent | reward=none | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "ablation_a vs ablation_b (classical)",
+    "latent=gaussian | reward=ablation_a | z=4 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=gaussian | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "ablation_c vs ablation_b (classical)",
+    "latent=gaussian | reward=ablation_c | z=4 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=gaussian | reward=ablation_b | z=4 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "ablation_d_clean vs ablation_b (quantum)",
+    "latent=vqc | reward=ablation_d_clean | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "ablation_e_diverse vs ablation_b (quantum)",
+    "latent=vqc | reward=ablation_e_diverse | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "8 qubits vs 4 qubits",
+    "latent=vqc | reward=ablation_b | z=8 | q=8L3 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ],
+  [
+    "6 layers vs 3 layers",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L6 | g=16 | data=qm9_5k_py37.sparsedataset",
+    "latent=vqc | reward=ablation_b | z=4 | q=4L3 | g=16 | data=qm9_5k_py37.sparsedataset"
+  ]
+]

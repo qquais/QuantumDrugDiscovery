@@ -198,6 +198,18 @@ class SparseMolecularDataset():
             if start > end:
                 mol.AddBond(int(start), int(end), self.bond_decoder_m[edge_labels[start, end]])
 
+        # atom_decoder_m maps the PAD class (atomic number 0) to unused vertex
+        # slots. Left in place, every one becomes an unbonded '*' atom, which
+        # makes any molecule smaller than `vertexes` heavy atoms register as a
+        # disconnected fragment regardless of whether it is chemically valid.
+        # Only atoms that stayed unbonded are dropped; a PAD slot the model
+        # actually bonded to is a real generation error and must stay so it is
+        # still counted as invalid/unclean.
+        pad_atom_idx = [a.GetIdx() for a in mol.GetAtoms()
+                        if a.GetAtomicNum() == 0 and a.GetDegree() == 0]
+        for idx in sorted(pad_atom_idx, reverse=True):
+            mol.RemoveAtom(idx)
+
         if strict:
             try:
                 Chem.SanitizeMol(mol)

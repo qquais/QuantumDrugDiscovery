@@ -1,0 +1,19 @@
+Run: results/quantum/QUANTUM_Fresh_0405_0231/20260405_023351/train
+Checkpoint: results/quantum/QUANTUM_Fresh_0405_0231/20260405_023351/train/model_dir/1-G.ckpt
+Dataset: data/qm9_5k.sparsedataset
+Samples: 5000
+Post method: softmax
+Generator dims: z_dim=8, g_conv_dim=[128, 256, 512]
+
+Validity fraction:   0.876
+Clean validity frac: 0.000
+Uniqueness fraction: 0.002
+Novelty fraction:    0.876
+
+Valid smiles count:  4382
+Contains "." count:  4382
+Contains "*" count:  4382
+
+QED  : mean=0.326, std=0.123, min=0.000
+logP : mean=0.310, std=1.246, min=-3.000
+SA   : mean=8.094, std=0.722, min=7.440

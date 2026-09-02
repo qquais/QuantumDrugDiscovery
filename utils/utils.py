@@ -257,6 +257,18 @@ class MolecularMetrics(object):
 
 
 def all_scores(mols, data, norm=False, reconstruction=False):
+    """DEPRECATED. Use qmolgan.chem.evaluate_molecules instead.
+
+    Kept only so `solver_legacy.py` still imports. Do not use it for anything
+    that ends up in a table: calling it with norm=True returns SA and logP in
+    [0,1] reward space (higher = better for SA), and reporting those as
+    property values is exactly the defect documented in docs/ERRATA.md §B.
+    """
+    import warnings as _warnings
+    _warnings.warn('all_scores is deprecated; use qmolgan.chem.evaluate_molecules '
+                   '(raw property scales, clean-valid denominators)',
+                   DeprecationWarning, stacklevel=2)
+
     m0 = {k: list(filter(lambda e: e is not None, v)) for k, v in {
         'NP': MolecularMetrics.natural_product_scores(mols, norm=norm),
         'QED': MolecularMetrics.quantitative_estimation_druglikeness_scores(mols),
@@ -273,27 +285,29 @@ def all_scores(mols, data, norm=False, reconstruction=False):
     return m0, m1
 
 
-def save_mol_img(mols, f_name='tmp.png', is_test=False):
-    print('Generating molecules...')
-    orig_f_name = f_name
-    for a_mol in mols:
-        try:
-            if Chem.MolToSmiles(a_mol) is not None:
-                if is_test:
-                    f_name = orig_f_name
-                    f_split = f_name.split('.')
-                    f_split[-1] = random_string() + '.' + f_split[-1]
-                    f_name = ''.join(f_split)
+def save_mol_img(mols, f_name='tmp.png', n_per_row=4, legends=None):
+    """Draw a grid of molecules to one PNG.
 
-                rdkit.Chem.Draw.MolToFile(a_mol, f_name)
-                a_smi = Chem.MolToSmiles(a_mol)
-                if read_smiles is not None:
-                    mol_graph = read_smiles(a_smi)
-
-                # break only give you one image
-                # break
-
-                # if not is_test:
-                #     break
-        except:
-            continue
+    The previous version looped over the list writing every molecule to the
+    SAME path, so only the last survived and callers silently got one
+    arbitrary structure where they expected a sample. Callers are expected to
+    pass clean-valid molecules only: figure 8 of the v1 paper showed
+    "representative valid molecules" that included padded fragments.
+    """
+    mols = [m for m in mols if m is not None]
+    if not mols:
+        return None
+    try:
+        img = Draw.MolsToGridImage(mols, molsPerRow=n_per_row,
+                                   subImgSize=(220, 220), legends=legends)
+        # MolsToGridImage returns a PIL image in a script context and an
+        # IPython object in a notebook; only the former can be saved.
+        if hasattr(img, 'save'):
+            img.save(f_name)
+        else:
+            with open(f_name, 'wb') as f:
+                f.write(img.data)
+        return f_name
+    except Exception as exc:
+        print(f'save_mol_img failed ({exc}); skipping image for {f_name}')
+        return None
