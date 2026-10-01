@@ -79,7 +79,12 @@ def selection_score(row):
         return float('nan')
     cv, uq = float(cv), float(uq)
     if not np.isfinite(cv) or not np.isfinite(uq):
-        return 0.0
+        # An epoch with no clean-valid molecules has no uniqueness_clean. It
+        # must be *ineligible*, not score 0.0: a finite zero would make every
+        # degenerate epoch eligible, and the earliest-epoch tiebreak would
+        # then pick the floor epoch instead of triggering the final-epoch
+        # fallback in select_best_epoch.
+        return float('nan')
     return cv * uq
 
 

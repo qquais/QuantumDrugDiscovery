@@ -18,6 +18,15 @@ the reporting defects found in the v1 audit (docs/ERRATA.md):
   path and differ only in the sampler.
 * Circuit weights are checkpointed as `{epoch}-Z.ckpt` state dicts instead of
   appended CSV rows (which desynced from epochs whenever a run was resumed).
+* The value network is trained on its own regression loss only, computed on
+  *detached* generator outputs, and the generator's RL term does not update V.
+  The upstream PyTorch port (and solver_legacy.py) back-propagated both losses
+  into both networks before stepping either, so G was pushed to make V's
+  regression easier and V to inflate its estimate of the generated graphs.
+* Per-epoch validation samples inside an isolated RNG scope. Seeding the
+  global generators there reset the training RNG after every epoch, so every
+  epoch after the first replayed the same noise and batch order regardless of
+  --seed.
 """
 
 import csv
@@ -310,7 +319,9 @@ class Solver(object):
             edges_hat, nodes_hat = self.postprocess((edges_logits, nodes_logits),
                                                     self.post_method, temp)
             logits_fake, _ = self.D(edges_hat, None, nodes_hat)
-            value_real, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
+            # value_fake (graph attached) feeds the generator's RL term;
+            # value_fake_det (generator outputs detached) feeds V's own
+            # regression loss, so that loss cannot reach G or the latent.
             value_fake, _ = self.V(edges_hat, None, nodes_hat, torch.sigmoid)
 
             loss_G = torch.mean(-logits_fake)
@@ -320,12 +331,15 @@ class Solver(object):
                 # of the real molecules in THIS batch (real_mols), so the two
                 # regression targets come from the same draw as the graphs the
                 # critic just saw.
+                value_real, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
+                value_fake_det, _ = self.V(edges_hat.detach(), None,
+                                           nodes_hat.detach(), torch.sigmoid)
                 reward_f = torch.from_numpy(
                     self.reward(self.decode(nodes_hat, edges_hat))).to(self.device)
                 reward_r = torch.from_numpy(
                     self.reward(list(real_mols))).to(self.device)
                 loss_V = torch.mean(torch.abs(value_real - reward_r)
-                                    + torch.abs(value_fake - reward_f))
+                                    + torch.abs(value_fake_det - reward_f))
             else:
                 loss_V = torch.tensor(0.0, device=self.device)
 
@@ -337,7 +351,11 @@ class Solver(object):
                 if self.la < 1.0 and self.enable_rl_loss:
                     alpha = torch.abs(loss_G.detach() / (loss_RL.detach() + 1e-8)).detach()
                     step_G = self.la * loss_G + (1.0 - self.la) * alpha * loss_RL
-                    step_G.backward(retain_graph=True)
+                    step_G.backward()
+                    # step_G reached V through value_fake; discard that before
+                    # V's own loss is back-propagated, so each optimiser steps
+                    # on exactly one objective.
+                    self.v_optimizer.zero_grad()
                     loss_V.backward()
                     self.g_optimizer.step()
                     self.v_optimizer.step()

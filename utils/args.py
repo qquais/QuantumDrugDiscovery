@@ -56,8 +56,10 @@ def get_GAN_config(argv=None):
     p.add_argument('--qubits', type=int, default=None,
                    help='VQC qubit count (defaults to --z_dim)')
     p.add_argument('--layer', type=int, default=3, help='VQC variational layers')
-    p.add_argument('--n_freq', type=int, default=3,
-                   help='frequency count for the classical trig surrogate latent')
+    p.add_argument('--n_freq', type=int, default=None,
+                   help='frequency count for the classical trig surrogate latent; '
+                        'default picks the smallest count whose budget n_freq*(z_dim+1) '
+                        'is at least the entangling VQC\'s 2*z_dim-1 weights')
     p.add_argument('--update_latent', type=str2bool, default=True,
                    help='train the latent source jointly with the generator')
     p.add_argument('--qc_lr', type=float, default=None,

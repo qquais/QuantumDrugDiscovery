@@ -264,3 +264,127 @@ def test_vqc_requires_z_dim_to_equal_qubits():
     from qmolgan.latent import make_latent
     with pytest.raises(ValueError):
         make_latent('vqc', dim=8, qubits=4, layers=3)
+
+
+def test_trig_budget_is_not_smaller_than_the_vqc():
+    """The trig surrogate is the classical control for the circuit's function
+    class; the comparison is only fair if it is never the under-parameterised
+    arm. make_latent's default must satisfy that for every grid width."""
+    from qmolgan.latent import make_latent, n_circuit_weights
+    for dim in (2, 4, 6, 8):
+        trig = make_latent('trig', dim=dim)
+        vqc = make_latent('vqc', dim=dim, qubits=dim, layers=3)
+        assert trig.describe()['n_params'] >= vqc.describe()['n_params']
+        assert vqc.describe()['n_params'] == n_circuit_weights(dim, 3, True)
+
+
+def test_circuit_weight_count_is_what_the_circuit_reads():
+    """Kao's indexing applies the same 2q-1 weights in every layer, so depth
+    adds no parameters. The count reported per run must be the number the
+    circuit reads, not the length of an over-allocated vector."""
+    from qmolgan.latent import make_latent, n_circuit_weights
+    assert n_circuit_weights(4, 3, entangle=True) == 7
+    assert n_circuit_weights(4, 6, entangle=True) == 7
+    assert n_circuit_weights(4, 3, entangle=False) == 4
+    assert make_latent('vqc', dim=4, qubits=4, layers=3).weights.numel() == 7
+    assert make_latent('vqc_noent', dim=4, qubits=4, layers=3).weights.numel() == 4
+
+
+def test_legacy_over_allocated_circuit_checkpoint_still_loads(tmp_path):
+    """Checkpoints written when the vector was layers*(2q-1) long must load
+    into the honest-length parameter, keeping the leading slice the circuit
+    actually used."""
+    import torch
+    from qmolgan.generate import load_latent_state
+    from qmolgan.latent import make_latent
+
+    lat = make_latent('vqc', dim=4, qubits=4, layers=3, seed=0)
+    legacy = torch.arange(21, dtype=torch.float64)
+    torch.save({'weights': legacy}, tmp_path / '5-Z.ckpt')
+    assert load_latent_state(lat, str(tmp_path), 5) == 'state_dict'
+    assert torch.equal(lat.weights.detach(), legacy[:7])
+
+
+def test_latent_statistics_can_hand_back_its_sample():
+    from qmolgan.latent import make_latent, latent_statistics
+    stats, z = latent_statistics(make_latent('uniform', dim=4), n=256, seed=3,
+                                 return_sample=True)
+    assert z.shape == (256, 4)
+    assert np.allclose(z.mean(0), stats['mean'])
+
+
+# ---------------------------------------------------------------------------
+# RNG hygiene
+# ---------------------------------------------------------------------------
+
+def test_seeded_sampling_leaves_the_callers_rng_alone():
+    """validate() runs once per epoch inside the training loop. If its seeded
+    sampling touched the global torch/numpy RNG, every epoch after the first
+    would replay identical noise and batch order, whatever --seed was."""
+    import torch
+    from qmolgan.latent import make_latent, latent_statistics, seeded_rng
+
+    torch.manual_seed(42)
+    np.random.seed(42)
+    torch.rand(3); np.random.rand(3)
+    expected_t = torch.get_rng_state().clone()
+    expected_np = np.random.get_state()
+
+    with seeded_rng(777):
+        torch.rand(10); np.random.rand(10)
+    assert torch.equal(torch.get_rng_state(), expected_t)
+    assert np.array_equal(np.random.get_state()[1], expected_np[1])
+
+    latent_statistics(make_latent('vqc', dim=2, qubits=2, layers=1), n=4, seed=777)
+    assert torch.equal(torch.get_rng_state(), expected_t)
+
+    # And the seeded draw itself is reproducible regardless of outer state.
+    with seeded_rng(777):
+        a = torch.rand(4)
+    torch.manual_seed(1)
+    with seeded_rng(777):
+        b = torch.rand(4)
+    assert torch.equal(a, b)
+
+
+# ---------------------------------------------------------------------------
+# Selection fallback, config authority, reference sampling
+# ---------------------------------------------------------------------------
+
+def test_all_degenerate_sweep_falls_back_to_the_final_epoch():
+    """A run with no clean-valid molecule at any epoch has no uniqueness_clean
+    anywhere. The pre-registered rule must then report the final epoch and
+    flag the fallback, not quietly pick the floor epoch with score 0."""
+    rows = [{'epoch': e, 'clean_validity': 0.0, 'uniqueness_clean': float('nan')}
+            for e in (1, 30, 150, 300)]
+    best, scored = protocol.select_best_epoch(rows, n_epochs=300)
+    assert best['epoch'] == 300
+    assert best['selection_fallback'] == 'no_eligible_epoch_final_used'
+    assert all(not np.isfinite(r['selection_score']) for r in scored)
+
+
+def test_config_json_wins_over_a_conflicting_cli_override(tmp_path):
+    """ERRATA D5: a hand-typed architecture evaluated the wrong network. The
+    recorded config is authoritative; a conflicting flag is an error."""
+    import json
+    from qmolgan.generate import read_run_config
+
+    cfg = {'dataset': 'd', 'latent': 'vqc', 'z_dim': 4, 'g_conv_dim': [16]}
+    (tmp_path / 'config.json').write_text(json.dumps(cfg))
+    assert read_run_config(str(tmp_path), {'z_dim': 4})['z_dim'] == 4
+    assert read_run_config(str(tmp_path), {'qubits': 4})['qubits'] == 4   # fills a gap
+    with pytest.raises(ValueError):
+        read_run_config(str(tmp_path), {'z_dim': 8})
+
+
+def test_reference_sample_does_not_depend_on_what_was_generated():
+    """SNN / W1 / KL compare every model against the training split. The
+    reference sub-sample must be a function of the seed alone, not of how
+    much other randomness the evaluation consumed first."""
+    train = [f'C{"C" * (i % 7)}O' for i in range(6000)]
+    a = chem.reference_sample(train, seed=5)
+    rng = np.random.default_rng(99)
+    rng.random(1000)                      # unrelated consumption
+    b = chem.reference_sample(train, seed=5)
+    assert [Chem.MolToSmiles(m) for m in a] == [Chem.MolToSmiles(m) for m in b]
+    assert len(a) == 5000

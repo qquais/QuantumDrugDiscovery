@@ -15,7 +15,8 @@ the results.json this produces, so a table cannot disagree with the protocol.
 
 Legacy runs that have no config.json can be described on the command line
 (--dataset/--latent/--z_dim/--qubits/--layers/--g_conv_dim); the values are
-recorded into the output so the reconstruction is never implicit.
+recorded into the output so the reconstruction is never implicit. When
+config.json exists it is authoritative and a conflicting flag is rejected.
 """
 
 import argparse
@@ -59,7 +60,8 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=256)
     p.add_argument('--fcd', action='store_true', help='compute FCD (needs fcd_torch)')
     p.add_argument('--device', default='cpu')
-    # Legacy-run description (ignored when config.json exists).
+    # Legacy-run description. When config.json exists these must agree with it;
+    # a conflicting value is an error, never a silent override (ERRATA D5).
     p.add_argument('--dataset', default=None)
     p.add_argument('--latent', default=None, choices=list(latent_mod.LATENT_KINDS))
     p.add_argument('--z_dim', type=int, default=None)
@@ -123,6 +125,7 @@ def main():
         print(f'\nSelection sweep: {len(sweep_epochs)} epochs x {args.n_select} molecules '
               f'(seed {protocol.select_seed(run_seed)})')
         sweep_rows = []
+        train_set = set(train_smiles)
         t0 = time.time()
         for i, epoch in enumerate(sweep_epochs):
             G, lat, data, _ = generate.load_run(run_dir, epoch, overrides,
@@ -132,8 +135,9 @@ def main():
                 seed=protocol.select_seed(run_seed), post_method=args.post_method,
                 device=args.device)
             # Selection uses only the two cheap structural metrics, so the
-            # sweep never pays for fingerprints/scaffolds it will not use.
-            row = quick_metrics(mols, set(train_smiles))
+            # sweep never pays for properties, fingerprints or scaffolds it
+            # will not use.
+            row = quick_metrics(mols, train_set)
             row['epoch'] = epoch
             sweep_rows.append(row)
             done, total = i + 1, len(sweep_epochs)
@@ -161,6 +165,7 @@ def main():
         report_epochs['final'] = final_epoch
 
     reports = {}
+    selected_latent = None
     for label, epoch in report_epochs.items():
         print(f'\nReport ({label}) epoch {epoch}: {args.n_report} molecules '
               f'(seed {protocol.report_seed(run_seed)})')
@@ -180,6 +185,8 @@ def main():
         metrics['epoch'] = epoch
         metrics['latent_state_source'] = load_cfg['latent_state_source']
         reports[label] = metrics
+        if label == 'selected':
+            selected_latent = lat
         with open(os.path.join(out_dir, f'smiles_{label}_epoch{epoch}.txt'), 'w') as f:
             f.write('\n'.join(clean))
         print('  ' + '  '.join(
@@ -187,8 +194,13 @@ def main():
             if isinstance(metrics.get(k), float) and np.isfinite(metrics[k])))
 
     # ---- 4. latent-space analysis -----------------------------------------
+    # On the SELECTED epoch's latent state, and says so: for trainable latents
+    # (vqc, trig) the final epoch's circuit differs, and aggregate.py reads
+    # these statistics alongside the selected-epoch metrics.
     lat_stats = latent_mod.latent_statistics(
-        lat, n=4096, seed=protocol.latent_seed(run_seed))
+        selected_latent, n=4096, seed=protocol.latent_seed(run_seed))
+    lat_stats['epoch'] = selected_epoch
+    lat_stats['latent'] = selected_latent.describe()
 
     out = {
         'run_dir': run_dir,
@@ -210,7 +222,9 @@ def quick_metrics(mols, train_set):
     """Cheap per-epoch metrics for the selection sweep only.
 
     Deliberately a subset of `chem.evaluate_molecules` — the same definitions,
-    without the O(n^2) diversity work that the selection rule never consults.
+    without the property, fingerprint or O(n^2) diversity work that the
+    selection rule never consults. Properties for the chosen epochs come from
+    the report stream, where they belong.
     """
     n = len(mols)
     valid_smi, clean_smi = [], []
@@ -224,7 +238,6 @@ def quick_metrics(mols, train_set):
         if chem.is_clean_valid(m):
             clean_smi.append(s)
     nv, nc = len(valid_smi), len(clean_smi)
-    props = chem.raw_properties([m for m in mols if chem.is_clean_valid(m)])
     return {
         'validity': nv / n if n else float('nan'),
         'clean_validity': nc / n if n else float('nan'),
@@ -233,9 +246,6 @@ def quick_metrics(mols, train_set):
         'novelty': sum(s not in train_set for s in valid_smi) / nv if nv else float('nan'),
         'novelty_clean': (sum(s not in train_set for s in clean_smi) / nc
                           if nc else float('nan')),
-        'QED': float(np.nanmean(props['QED'])) if nc else float('nan'),
-        'logP': float(np.nanmean(props['logP'])) if nc else float('nan'),
-        'SA': float(np.nanmean(props['SA'])) if nc else float('nan'),
     }
 
 

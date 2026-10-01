@@ -9,7 +9,7 @@ on CPU, so requesting GPUs only costs queue time.
 ```bash
 git clone <repo> && cd QuantumDrugDiscovery
 conda env create -f environment.yml && conda activate molgan-pt
-python -m pytest tests/ -q          # 19 tests, ~10 s. Must pass before anything else.
+python -m pytest tests/ -q          # 27 tests, ~15 s. Must pass before anything else.
 
 # Datasets (not in git). Copy or regenerate:
 #   data/qm9_5k_py37.sparsedataset   — 4,994 molecules, main comparison

@@ -272,6 +272,21 @@ def frechet_chemnet_distance(gen_smiles, ref_smiles, device='cpu'):
 # The one entry point
 # ---------------------------------------------------------------------------
 
+def reference_sample(train_smiles, seed, max_n=5000):
+    """The training-split reference used for SNN and the W1/KL distances.
+
+    Drawn from its own RNG stream, keyed only on ``seed`` and the training
+    split, so every model evaluated under the same seed is compared against
+    the same reference molecules whatever else it generated.
+    """
+    ref_smi = list(train_smiles)
+    if len(ref_smi) > max_n:
+        rng = np.random.default_rng([int(seed), 2])
+        ref_smi = [ref_smi[i] for i in rng.choice(len(ref_smi), max_n, replace=False)]
+    mols = [Chem.MolFromSmiles(s) for s in ref_smi]
+    return [m for m in mols if m is not None]
+
+
 def evaluate_molecules(mols, train_smiles, reference_mols=None,
                        compute_fcd=False, seed=0, device='cpu'):
     """Score a list of generated Mols against a training reference.
@@ -294,7 +309,15 @@ def evaluate_molecules(mols, train_smiles, reference_mols=None,
     -------
     dict of metric name -> float / int
     """
-    rng = np.random.default_rng(seed)
+    # Independent RNG streams per consumer. One shared generator made the
+    # training-reference sub-sample depend on whether IntDiv had sub-sampled
+    # first (i.e. on how many clean uniques THIS model produced), so two
+    # models' SNN / W1 / KL columns were computed against different reference
+    # draws. IntDiv1 and IntDiv2 also share a stream so they score the same
+    # sub-sample.
+    seed = int(seed)
+    rng_div = lambda: np.random.default_rng([seed, 1])  # noqa: E731
+    rng_snn = np.random.default_rng([seed, 3])
     n_total = len(mols)
     out = {'n_generated': n_total}
     if n_total == 0:
@@ -349,21 +372,18 @@ def evaluate_molecules(mols, train_smiles, reference_mols=None,
             seen.add(s)
             uniq_clean_mols.append(m)
     gen_fps = morgan_fps(uniq_clean_mols)
-    out['int_div1'] = internal_diversity(gen_fps, p=1, rng=rng)
-    out['int_div2'] = internal_diversity(gen_fps, p=2, rng=rng)
+    out['int_div1'] = internal_diversity(gen_fps, p=1, rng=rng_div())
+    out['int_div2'] = internal_diversity(gen_fps, p=2, rng=rng_div())
     n_scaff, scaff_div = scaffold_stats(clean_mols)
     out['n_scaffolds'] = n_scaff
     out['scaffold_diversity'] = scaff_div
 
     # Reference-dependent metrics.
     if reference_mols is None:
-        ref_smi = list(train_smiles)
-        if len(ref_smi) > 5000:
-            ref_smi = [ref_smi[i] for i in rng.choice(len(ref_smi), 5000, replace=False)]
-        reference_mols = [Chem.MolFromSmiles(s) for s in ref_smi]
-        reference_mols = [m for m in reference_mols if m is not None]
+        reference_mols = reference_sample(train_smiles, seed)
+    out['n_reference'] = len(reference_mols)
     ref_fps = morgan_fps(reference_mols)
-    out['snn_to_train'] = nearest_neighbour_similarity(gen_fps, ref_fps, rng=rng)
+    out['snn_to_train'] = nearest_neighbour_similarity(gen_fps, ref_fps, rng=rng_snn)
 
     ref_props = raw_properties(reference_mols)
     for key in PROPERTY_KEYS:

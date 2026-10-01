@@ -261,8 +261,11 @@ def fig_training_curves(results_root, out_dir, metrics=('clean_validity',
             n_epochs = min(len(d) for d in dfs)
             if n_epochs == 0:
                 continue
-            stack = np.vstack([d[metric].to_numpy()[:n_epochs] for d in dfs
-                               if metric in d])
+            cols = [d[metric].to_numpy()[:n_epochs] for d in dfs if metric in d]
+            if not cols:
+                # np.vstack([]) raises before any size check could run.
+                continue
+            stack = np.vstack(cols)
             if stack.size == 0:
                 continue
             mean = np.nanmean(stack, axis=0)

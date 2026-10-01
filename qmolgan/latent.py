@@ -13,7 +13,7 @@ that the ablations can isolate them:
   uniform    z ~ U(-1, 1)^d                     bounded,   d independent dims
   rank2      z = f(u1, u2), u ~ U(-1, 1)^2      bounded,   2 intrinsic dims
   trig       classical trigonometric surrogate  bounded,   2 intrinsic dims,
-             with the same trainable-parameter count as the VQC
+             trainable budget >= the VQC's (see make_latent)
   vqc        Kao et al. 2023 variational circuit (entangling)
   vqc_noent  the same circuit with the CNOT blocks removed
 
@@ -28,6 +28,7 @@ trigonometric polynomial in the encoded angles, so `trig` is not a loose
 analogy — it is a classical model of the same function class.
 """
 
+import contextlib
 import math
 
 import numpy as np
@@ -35,6 +36,24 @@ import torch
 import torch.nn as nn
 
 LATENT_KINDS = ('gaussian', 'uniform', 'rank2', 'trig', 'vqc', 'vqc_noent')
+
+
+@contextlib.contextmanager
+def seeded_rng(seed):
+    """Seed the torch and NumPy global generators inside the block only.
+
+    Both states are restored on exit, so a seeded sampling call (validation,
+    the protocol's selection/report streams, latent analysis) can never reset
+    the RNG that a surrounding training loop depends on.
+    """
+    np_state = np.random.get_state()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(seed))
+        np.random.seed(int(seed) % (2 ** 32))
+        try:
+            yield
+        finally:
+            np.random.set_state(np_state)
 
 
 class LatentSampler(nn.Module):
@@ -120,10 +139,12 @@ class TrigLatent(LatentSampler):
 
     A Pauli-Z expectation of the Kao circuit is a finite trigonometric
     polynomial in the two encoded angles, with frequency support set by the
-    circuit depth. This module learns exactly such a polynomial with a
-    matched trainable-parameter budget, giving the strongest available
-    classical control: if it matches the VQC, the VQC's contribution is its
-    function class and not its quantumness.
+    circuit depth. This module learns exactly such a polynomial. Its budget is
+    ``n_freq * (dim + 1)`` trainable parameters; ``make_latent`` picks the
+    smallest ``n_freq`` whose budget is at least the entangling circuit's
+    (10 vs 7 for four wires), so the surrogate is never the under-parameterised
+    arm. It is the strongest available classical control: if it matches the
+    VQC, the VQC's contribution is its function class and not its quantumness.
     """
 
     kind = 'trig'
@@ -197,14 +218,19 @@ def build_gen_circuit(qubits, layers, entangle=True, device_name='default.qubit'
 
 
 def n_circuit_weights(qubits, layers, entangle=True):
-    """Parameter count of the circuit above.
+    """Number of trainable weights the circuit above actually reads.
 
-    The entangling variant consumes ``qubits`` RY weights plus ``qubits - 1``
-    RZ weights per layer, but the original Kao indexing reads them from one
-    flat vector of length ``layers * (2 * qubits - 1)`` and reuses the same
-    slice every layer; that shape is preserved here so old checkpoints load.
+    Kao et al.'s indexing applies the *same* ``qubits`` RY weights and
+    ``qubits - 1`` RZ weights in every layer (``w[i]`` and ``w[i + qubits]``,
+    independent of the layer index), so depth adds gates but no parameters.
+    The entangling circuit reads ``2 * qubits - 1`` weights and the product
+    circuit ``qubits``. Earlier versions allocated ``layers * (2q - 1)`` and
+    reported that as the parameter count; the surplus never reached the
+    circuit. ``generate.load_latent_state`` truncates such checkpoints.
+    ``layers`` is accepted so call sites stay uniform.
     """
-    return layers * (2 * qubits - 1)
+    del layers
+    return 2 * qubits - 1 if entangle else qubits
 
 
 class VQCLatent(LatentSampler):
@@ -245,9 +271,20 @@ class VQCLatent(LatentSampler):
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_latent(kind, dim=None, qubits=None, layers=3, seed=0, n_freq=3,
+def trig_n_freq_for_budget(dim, layers=3):
+    """Smallest ``n_freq`` whose trig budget ``n_freq * (dim + 1)`` is at least
+    the entangling circuit's weight count on ``dim`` wires."""
+    target = n_circuit_weights(dim, layers, entangle=True)
+    return max(1, int(math.ceil(target / (dim + 1))))
+
+
+def make_latent(kind, dim=None, qubits=None, layers=3, seed=0, n_freq=None,
                 device_name='default.qubit'):
-    """Build a latent sampler by name. ``dim`` defaults to ``qubits`` for VQCs."""
+    """Build a latent sampler by name. ``dim`` defaults to ``qubits`` for VQCs.
+
+    For ``trig``, ``n_freq=None`` selects the budget-matched default from
+    :func:`trig_n_freq_for_budget`; pass an integer to override it.
+    """
     kind = kind.lower()
     if kind in ('vqc', 'vqc_noent'):
         if qubits is None:
@@ -267,21 +304,25 @@ def make_latent(kind, dim=None, qubits=None, layers=3, seed=0, n_freq=3,
     if kind == 'rank2':
         return Rank2Latent(dim, seed=seed)
     if kind == 'trig':
-        return TrigLatent(dim, n_freq=n_freq, seed=seed)
+        if n_freq is None:
+            n_freq = trig_n_freq_for_budget(int(dim), layers)
+        return TrigLatent(dim, n_freq=int(n_freq), seed=seed)
     raise ValueError(f'unknown latent kind {kind!r}; expected one of {LATENT_KINDS}')
 
 
-def latent_statistics(sampler, n=4096, seed=0):
+def latent_statistics(sampler, n=4096, seed=0, return_sample=False):
     """Empirical statistics of a latent source, for the latent-space analysis
     the v1 analysis asserted but never measured.
 
     Returns per-dimension mean/std, the correlation matrix, the eigenvalue
     spectrum of the covariance (which exposes the rank-2 structure of the VQC
     directly), participation ratio as an effective-dimension summary, and a
-    differential-entropy estimate.
+    differential-entropy estimate. With ``return_sample=True`` the drawn
+    ``(n, dim)`` array is returned as a second value so callers can compute
+    further statistics on the same draw instead of simulating again.
+    The caller's RNG state is left untouched.
     """
-    torch.manual_seed(seed)
-    with torch.no_grad():
+    with seeded_rng(seed), torch.no_grad():
         z = sampler.sample(n).double().cpu().numpy()
     mean = z.mean(0)
     std = z.std(0)
@@ -296,7 +337,7 @@ def latent_statistics(sampler, n=4096, seed=0):
     # Kozachenko-Leonenko style entropy proxy: log-det of the covariance is
     # enough to show a degenerate (rank-deficient) latent without extra deps.
     sign, logdet = np.linalg.slogdet(cov + 1e-12 * np.eye(cov.shape[0]))
-    return {
+    stats = {
         'n': int(n),
         'mean': mean.tolist(),
         'std': std.tolist(),
@@ -307,3 +348,4 @@ def latent_statistics(sampler, n=4096, seed=0):
         'effective_rank_99pct': int(np.searchsorted(np.cumsum(eig_pos) / total, 0.99) + 1)
                                  if total > 0 else 0,
     }
+    return (stats, z) if return_sample else stats

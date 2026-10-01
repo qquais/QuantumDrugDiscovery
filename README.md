@@ -14,7 +14,7 @@ sources, under identical training and a pre-registered evaluation protocol.
 
 ```bash
 conda env create -f environment.yml && conda activate molgan-pt
-python -m pytest tests/ -q                 # 19 tests pinning the metric definitions
+python -m pytest tests/ -q                 # 27 tests pinning the metric definitions
 
 python analyze_latent.py                   # latent-space analysis, no training needed
 python main.py --saving_dir results/runs/demo --latent vqc --z_dim 4 --qubits 4 \
@@ -93,7 +93,7 @@ make_figures.py         all figures, from results only
 configs/manifest.csv    the experiment grid, as version-controlled data
 configs/pairs.json      the 15 pre-specified paired contrasts
 scripts/                manifest builder, SLURM array drivers, errata reproduction
-tests/                  19 regression tests, one per known defect
+tests/                  27 regression tests, one per known defect
 docs/                   ERRATA, EXPERIMENTS, METHODOLOGY, PAPER_PLAN
 solver_legacy.py        the v1 training loop, kept only for reference
 ```
@@ -115,7 +115,10 @@ exactly one axis:
 
 `trig` is not a loose analogy: a Pauli-Z expectation of this circuit family is
 a finite trigonometric polynomial in the two encoded angles, so it is a
-classical model of the same function class with a matched parameter budget.
+classical model of the same function class. Its trainable budget is chosen to
+be at least the circuit's: Kao's indexing applies the same 2q-1 weights in every
+layer, so a 4-wire VQC trains 7 parameters whatever its depth (4 without the
+entangling blocks), and the surrogate trains 10.
 
 ## Artifact release
 

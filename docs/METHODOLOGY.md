@@ -29,7 +29,12 @@ dimension (8 vs 4), generator width ([128] vs [16]) and evaluation sample size,
 simultaneously. `scripts/build_manifest.py` fixes dataset, epochs, batch size,
 `n_critic`, optimiser and learning rates across every run in T1-T6; only the
 named factor varies. `qmolgan/protocol.py` fixes n = 5000 for every reported
-number.
+number. Two training-loop details matter for the seeds to mean anything:
+per-epoch validation samples inside an isolated RNG scope (seeding the global
+generators there had reset the training noise to the same state after every
+epoch, for every seed), and the value network is trained on its own loss over
+detached generator outputs, so neither G nor V receives the other's gradient
+(the upstream PyTorch port back-propagated both losses into both).
 
 ## 4. Reward shaping and latent source must be separable
 
@@ -58,8 +63,13 @@ paper says so.
 Three controls, each matching the VQC on one axis: `uniform` (bounded
 support), `rank2` (intrinsic rank 2, no trainable parameters), and `trig` (a
 trainable trigonometric polynomial — the *same function class* a Pauli-Z
-expectation of this circuit family belongs to, with a matched parameter
-budget). Run in **T2** under the identical reward.
+expectation of this circuit family belongs to). The circuit's trainable budget
+is small and depth-independent: Kao's indexing applies the same `2q-1` weights
+in every layer, so the 4-wire VQC trains 7 parameters (4 without entangling
+blocks). `trig` defaults to the smallest frequency count whose budget
+`n_freq*(dim+1)` is at least that (10 for four wires), so the surrogate is
+never the under-parameterised arm; `describe()['n_params']` records the
+effective count for every run. Run in **T2** under the identical reward.
 
 ## 7. The metric suite must cover diversity and distribution matching
 
@@ -84,8 +94,12 @@ read against how close the molecules actually are to training chemistry.
 `qmolgan/protocol.py` fixes the rule (`argmax clean_validity ×
 uniqueness_clean`), an epoch floor at 10% of training, and **two disjoint noise
 streams** — selection at n = 1000, reporting at n = 5000 — so a model is never
-selected and reported on the same molecules. Every model additionally reports
-its **final** epoch as a selection-free row.
+selected and reported on the same molecules. An epoch with no clean-valid
+molecule has no score and is ineligible; a run with none anywhere falls back
+to its final epoch and `results.json` says so. Every model additionally
+reports its **final** epoch as a selection-free row, and the latent-space
+statistics it carries are computed on the selected epoch's latent state, with
+that epoch recorded.
 
 ## 10. Property scales must be stated and consistent
 
@@ -132,7 +146,7 @@ The whole pipeline is four commands (`main.py`, `evaluate_run.py`,
 commits every small result artifact — `config.json`, `history.csv`,
 `epoch_sweep.csv`, `results.json`, generated SMILES, tables, figures — and
 ignores only large regenerable files. The experiment grid is version-controlled
-data (`configs/manifest.csv`), 19 unit tests pin the metric definitions, and
+data (`configs/manifest.csv`), 27 unit tests pin the metric definitions, and
 `scripts/reproduce_errata.py` reproduces the v1 defects from a v1 checkpoint in
 one command.
 

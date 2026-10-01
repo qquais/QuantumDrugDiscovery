@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from data.sparse_molecular_dataset import SparseMolecularDataset
 from models.models import Generator
 from qmolgan import chem
-from qmolgan.latent import make_latent, n_circuit_weights
+from qmolgan.latent import make_latent, n_circuit_weights, seeded_rng
 
 CONFIG_NAME = 'config.json'
 
@@ -49,15 +49,32 @@ def write_run_config(run_dir, config_dict):
 
 
 def read_run_config(run_dir, overrides=None):
-    """Load config.json, applying explicit overrides for legacy runs that
-    predate it. Raises if neither exists, rather than guessing."""
+    """Load config.json; ``overrides`` describe legacy runs that predate it.
+
+    When config.json exists it is authoritative: an override that *conflicts*
+    with a recorded value raises instead of silently replacing it, because a
+    hand-typed architecture is exactly how v1 evaluated at least one quantum
+    row with the wrong generator (ERRATA D5). Overrides only fill in keys the
+    file does not have. Raises if neither source supplies the architecture,
+    rather than guessing.
+    """
     path = os.path.join(run_dir, CONFIG_NAME)
     cfg = {}
     if os.path.exists(path):
         with open(path) as f:
             cfg = json.load(f)
     if overrides:
-        cfg.update({k: v for k, v in overrides.items() if v is not None})
+        overrides = {k: v for k, v in overrides.items() if v is not None}
+        conflicts = {k: (cfg[k], v) for k, v in overrides.items()
+                     if k in cfg and cfg[k] is not None and cfg[k] != v}
+        if conflicts:
+            raise ValueError(
+                f'{path} records {conflicts!r} as (recorded, override); refusing '
+                'to evaluate with an architecture that differs from the one the '
+                'run was trained with. Drop the flag, or edit config.json if it '
+                'is genuinely wrong.')
+        for k, v in overrides.items():
+            cfg.setdefault(k, v)
     required = ('dataset', 'latent', 'z_dim', 'g_conv_dim')
     missing = [k for k in required if cfg.get(k) is None]
     if missing:
@@ -122,9 +139,24 @@ def build_generator(cfg, data, device='cpu'):
 
 
 def build_latent(cfg, seed=0):
+    n_freq = cfg.get('n_freq')
     return make_latent(cfg['latent'], dim=int(cfg['z_dim']),
                        qubits=cfg.get('qubits'), layers=int(cfg.get('layers', 3)),
-                       seed=seed, n_freq=int(cfg.get('n_freq', 3)))
+                       seed=seed, n_freq=int(n_freq) if n_freq is not None else None)
+
+
+def _truncate_legacy_circuit_weights(latent, state, path):
+    """Checkpoints written before n_circuit_weights counted only the weights
+    the circuit reads carry a longer ``weights`` vector. Keep the leading
+    slice the circuit actually consumed; refuse anything else."""
+    if 'weights' in state and hasattr(latent, 'weights'):
+        have, need = state['weights'].numel(), latent.weights.numel()
+        if have > need:
+            state = dict(state)
+            state['weights'] = state['weights'].flatten()[:need].clone()
+        elif have < need:
+            raise ValueError(f'{path} holds {have} circuit weights, latent needs {need}')
+    return state
 
 
 def load_latent_state(latent, model_dir, epoch):
@@ -138,7 +170,9 @@ def load_latent_state(latent, model_dir, epoch):
     """
     z_path = os.path.join(model_dir, f'{epoch}-Z.ckpt')
     if os.path.exists(z_path):
-        latent.load_state_dict(torch.load(z_path, map_location='cpu'))
+        state = torch.load(z_path, map_location='cpu')
+        state = _truncate_legacy_circuit_weights(latent, state, z_path)
+        latent.load_state_dict(state)
         return 'state_dict'
 
     csv_path = os.path.join(model_dir, 'molgan_red_weights.csv')
@@ -150,6 +184,11 @@ def load_latent_state(latent, model_dir, epoch):
             raise ValueError(f'no circuit weights for epoch {epoch} in {csv_path}')
         vals = rows.iloc[-1, 1:].values.astype(float)
         expected = latent.weights.numel()
+        if vals.size > expected:
+            # Legacy vectors were layers*(2q-1) long; the circuit only ever
+            # read the first 2q-1 (or q) entries. Dropping the rest changes
+            # nothing about the circuit that was trained.
+            vals = vals[:expected]
         if vals.size != expected:
             raise ValueError(f'{csv_path} epoch {epoch} has {vals.size} weights, '
                              f'latent expects {expected}')
@@ -185,14 +224,17 @@ def sample_molecules(G, latent, data, n, batch_size=256, seed=0,
     The seed controls every stochastic element (torch global RNG drives both
     the classical samplers and the VQC's z1/z2 draws), so two evaluations of
     the same checkpoint with the same seed return identical molecules — a
-    prerequisite for the val/test noise split in qmolgan.protocol.
+    prerequisite for the val/test noise split in qmolgan.protocol. The
+    caller's RNG state is untouched on return.
     """
     G.eval()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
     mols = []
-    with torch.no_grad():
+    # The seed is applied inside an isolated RNG scope. Seeding the *global*
+    # generators here (as this function once did) meant that the per-epoch
+    # validation call in solver.py reset the training RNG to the same state
+    # after every epoch: identical latent noise, gradient-penalty draws and
+    # batch shuffles each epoch, and identical across --seed values.
+    with seeded_rng(seed), torch.no_grad():
         while len(mols) < n:
             cur = min(batch_size, n - len(mols))
             z = latent.sample(cur, device=device).float()

@@ -115,10 +115,10 @@ def circuit_entanglement(qubits, layers, entangle, n=64, seed=0):
 
 def analyse(kind, dim, qubits, layers, n, seed):
     sampler = make_latent(kind, dim=dim, qubits=qubits, layers=layers, seed=seed)
-    stats = latent_statistics(sampler, n=n, seed=seed)
-    torch.manual_seed(seed + 1)
-    with torch.no_grad():
-        z = sampler.sample(n).double().cpu().numpy()
+    # One draw serves both the covariance statistics and the energy-distance /
+    # occupancy statistics below; simulating the circuit twice per point
+    # doubled the cost of the 8-qubit sweep for no information.
+    stats, z = latent_statistics(sampler, n=n, seed=seed, return_sample=True)
 
     rng = np.random.default_rng(seed)
     gauss = rng.standard_normal((n, dim))
